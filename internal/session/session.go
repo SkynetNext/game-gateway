@@ -53,89 +53,117 @@ const (
 )
 
 // Manager manages client sessions in memory
+// Optimized: uses sharded maps to reduce lock contention
 type Manager struct {
+	shards [16]*SessionShard // 16 shards for better concurrency
+}
+
+// SessionShard is a shard of the session map
+type SessionShard struct {
 	mu       sync.RWMutex
 	sessions map[int64]*Session
 }
 
 // NewManager creates a new session manager
 func NewManager() *Manager {
-	return &Manager{
-		sessions: make(map[int64]*Session),
+	m := &Manager{}
+	for i := range m.shards {
+		m.shards[i] = &SessionShard{
+			sessions: make(map[int64]*Session),
+		}
 	}
+	return m
+}
+
+// getShard returns the shard for a given session ID
+func (m *Manager) getShard(sessionID int64) *SessionShard {
+	// Use low 4 bits for shard selection (16 shards)
+	return m.shards[sessionID&0xF]
 }
 
 // Add adds a session
 func (m *Manager) Add(session *Session) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.sessions[session.SessionID] = session
+	shard := m.getShard(session.SessionID)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	shard.sessions[session.SessionID] = session
 }
 
 // Get gets a session by session ID
 func (m *Manager) Get(sessionID int64) (*Session, bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	session, ok := m.sessions[sessionID]
+	shard := m.getShard(sessionID)
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+	session, ok := shard.sessions[sessionID]
 	return session, ok
 }
 
 // Remove removes a session
 func (m *Manager) Remove(sessionID int64) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.sessions, sessionID)
+	shard := m.getShard(sessionID)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	delete(shard.sessions, sessionID)
 }
 
 // UpdateLastActive updates the last active time of a session
 func (m *Manager) UpdateLastActive(sessionID int64) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if session, ok := m.sessions[sessionID]; ok {
+	shard := m.getShard(sessionID)
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+	if session, ok := shard.sessions[sessionID]; ok {
 		session.LastActiveAt = time.Now()
 	}
 }
 
 // Count returns the number of active sessions
 func (m *Manager) Count() int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return len(m.sessions)
+	total := 0
+	for _, shard := range m.shards {
+		shard.mu.RLock()
+		total += len(shard.sessions)
+		shard.mu.RUnlock()
+	}
+	return total
 }
 
 // CleanupIdle removes idle sessions that exceed the timeout
 func (m *Manager) CleanupIdle(idleTimeout time.Duration) int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	now := time.Now()
-	count := 0
+	totalCount := 0
 
-	for sessionID, session := range m.sessions {
-		if now.Sub(session.LastActiveAt) > idleTimeout {
-			// Close connections
-			if session.ClientConn != nil {
-				session.ClientConn.Close()
+	for _, shard := range m.shards {
+		shard.mu.Lock()
+		count := 0
+		for sessionID, session := range shard.sessions {
+			if now.Sub(session.LastActiveAt) > idleTimeout {
+				// Close connections
+				if session.ClientConn != nil {
+					session.ClientConn.Close()
+				}
+				if session.BackendConn != nil {
+					session.BackendConn.Close()
+				}
+				delete(shard.sessions, sessionID)
+				count++
 			}
-			if session.BackendConn != nil {
-				session.BackendConn.Close()
-			}
-			delete(m.sessions, sessionID)
-			count++
 		}
+		shard.mu.Unlock()
+		totalCount += count
 	}
 
-	return count
+	return totalCount
 }
 
 // GetAll returns all sessions (for monitoring)
 func (m *Manager) GetAll() []*Session {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	sessions := make([]*Session, 0, len(m.sessions))
-	for _, session := range m.sessions {
-		sessions = append(sessions, session)
+	allSessions := make([]*Session, 0)
+	for _, shard := range m.shards {
+		shard.mu.RLock()
+		for _, session := range shard.sessions {
+			allSessions = append(allSessions, session)
+		}
+		shard.mu.RUnlock()
 	}
-	return sessions
+	return allSessions
 }

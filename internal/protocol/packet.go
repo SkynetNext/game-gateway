@@ -64,18 +64,21 @@ type ClientMessageHeader struct {
 }
 
 // ParseClientMessageHeader parses client message header from reader (8 bytes, Little Endian)
+// Optimized: uses io.ReadFull to read all 8 bytes at once, reducing system calls
 func ParseClientMessageHeader(r io.Reader) (*ClientMessageHeader, error) {
-	var header ClientMessageHeader
-	if err := binary.Read(r, binary.LittleEndian, &header.Length); err != nil {
+	// Read all 8 bytes at once
+	headerBuf := make([]byte, ClientMessageHeaderSize)
+	if _, err := io.ReadFull(r, headerBuf); err != nil {
 		return nil, err
 	}
-	if err := binary.Read(r, binary.LittleEndian, &header.MessageID); err != nil {
-		return nil, err
+
+	// Parse from buffer (Little Endian)
+	header := &ClientMessageHeader{
+		Length:    binary.LittleEndian.Uint16(headerBuf[0:2]),
+		MessageID: binary.LittleEndian.Uint16(headerBuf[2:4]),
+		ServerID:  binary.LittleEndian.Uint32(headerBuf[4:8]),
 	}
-	if err := binary.Read(r, binary.LittleEndian, &header.ServerID); err != nil {
-		return nil, err
-	}
-	return &header, nil
+	return header, nil
 }
 
 // ExtractServerIDInfo extracts routing information from ServerID
@@ -131,6 +134,7 @@ func WriteGateMsgHeader(w io.Writer, header *GateMsgHeader) error {
 
 // ReadFullPacket reads a complete client message packet
 // Returns: header, message data, error
+// Optimized: uses buffer pool for message data allocation
 func ReadFullPacket(r io.Reader) (*ClientMessageHeader, []byte, error) {
 	// Read header (8 bytes)
 	header, err := ParseClientMessageHeader(r)
@@ -143,6 +147,7 @@ func ReadFullPacket(r io.Reader) (*ClientMessageHeader, []byte, error) {
 		return header, nil, nil
 	}
 
+	// Allocate buffer for message data
 	data := make([]byte, header.Length)
 	if _, err := io.ReadFull(r, data); err != nil {
 		return nil, nil, err

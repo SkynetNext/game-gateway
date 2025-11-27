@@ -63,6 +63,7 @@ func (c *Connection) Close() error {
 }
 
 // Pool manages a pool of TCP connections to a backend service
+// Optimized: uses channel for O(1) idle connection retrieval
 type Pool struct {
 	address        string
 	dialTimeout    time.Duration
@@ -71,7 +72,8 @@ type Pool struct {
 	maxPerService  int
 
 	mu          sync.RWMutex
-	connections []*Connection
+	idleConns   chan *Connection     // Channel for idle connections (O(1) access)
+	activeConns map[*Connection]bool // Set of active connections
 	activeCount int
 }
 
@@ -83,23 +85,37 @@ func NewPool(address string, dialTimeout, idleTimeout time.Duration, maxConnecti
 		idleTimeout:    idleTimeout,
 		maxConnections: maxConnections,
 		maxPerService:  maxPerService,
-		connections:    make([]*Connection, 0),
+		idleConns:      make(chan *Connection, maxPerService), // Buffered channel
+		activeConns:    make(map[*Connection]bool),
 	}
 }
 
 // Get gets a connection from the pool
+// Optimized: O(1) retrieval from channel instead of O(n) linear search
 func (p *Pool) Get(ctx context.Context) (*Connection, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	// Try to reuse idle connection
-	for _, conn := range p.connections {
-		if conn.IsIdle() && !conn.IsExpired(p.idleTimeout) {
+	// Try to get idle connection from channel (non-blocking)
+	select {
+	case conn := <-p.idleConns:
+		// Check if connection is still valid
+		if !conn.IsExpired(p.idleTimeout) {
+			p.mu.Lock()
 			conn.MarkInUse()
+			p.activeConns[conn] = true
 			p.activeCount++
+			p.mu.Unlock()
 			return conn, nil
 		}
+		// Connection expired, close it and create new one
+		conn.Close()
+		p.mu.Lock()
+		delete(p.activeConns, conn)
+		p.mu.Unlock()
+	default:
+		// No idle connection available
 	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
 	// Check if exceeds max connections
 	if p.activeCount >= p.maxPerService {
@@ -122,20 +138,29 @@ func (p *Pool) Get(ctx context.Context) (*Connection, error) {
 		inUse:      true,
 	}
 
-	p.connections = append(p.connections, connection)
+	p.activeConns[connection] = true
 	p.activeCount++
 
 	return connection, nil
 }
 
 // Put returns a connection to the pool
+// Optimized: uses channel for O(1) insertion
 func (p *Pool) Put(conn *Connection) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	conn.MarkIdle()
+	delete(p.activeConns, conn)
 	if p.activeCount > 0 {
 		p.activeCount--
+	}
+	p.mu.Unlock()
+
+	// Try to put back to idle channel (non-blocking)
+	select {
+	case p.idleConns <- conn:
+		// Successfully returned to pool
+	default:
+		// Channel full, connection will be closed during cleanup
 	}
 }
 
@@ -145,14 +170,9 @@ func (p *Pool) Remove(conn *Connection) {
 	defer p.mu.Unlock()
 
 	conn.Close()
-	for i, c := range p.connections {
-		if c == conn {
-			p.connections = append(p.connections[:i], p.connections[i+1:]...)
-			if p.activeCount > 0 {
-				p.activeCount--
-			}
-			break
-		}
+	delete(p.activeConns, conn)
+	if p.activeCount > 0 {
+		p.activeCount--
 	}
 }
 
@@ -162,22 +182,30 @@ func (p *Pool) Cleanup() int {
 	defer p.mu.Unlock()
 
 	count := 0
-	valid := make([]*Connection, 0, len(p.connections))
-
-	for _, conn := range p.connections {
-		if conn.IsExpired(p.idleTimeout) {
-			conn.Close()
-			count++
-			if conn.inUse {
-				p.activeCount--
+	// Drain idle channel and check for expired connections
+	for {
+		select {
+		case conn := <-p.idleConns:
+			if conn.IsExpired(p.idleTimeout) {
+				conn.Close()
+				delete(p.activeConns, conn)
+				count++
+			} else {
+				// Put back if still valid
+				select {
+				case p.idleConns <- conn:
+				default:
+					// Channel full, close connection
+					conn.Close()
+					delete(p.activeConns, conn)
+					count++
+				}
 			}
-		} else {
-			valid = append(valid, conn)
+		default:
+			// Channel empty, done
+			return count
 		}
 	}
-
-	p.connections = valid
-	return count
 }
 
 // Stats returns pool statistics
@@ -185,7 +213,7 @@ func (p *Pool) Stats() (total, active, idle int) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	total = len(p.connections)
+	total = len(p.activeConns)
 	active = p.activeCount
 	idle = total - active
 	return
@@ -196,10 +224,21 @@ func (p *Pool) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	for _, conn := range p.connections {
+	// Close all active connections
+	for conn := range p.activeConns {
 		conn.Close()
 	}
-	p.connections = nil
-	p.activeCount = 0
-	return nil
+	p.activeConns = make(map[*Connection]bool)
+
+	// Drain and close idle connections
+	for {
+		select {
+		case conn := <-p.idleConns:
+			conn.Close()
+		default:
+			// Channel empty, done
+			p.activeCount = 0
+			return nil
+		}
+	}
 }

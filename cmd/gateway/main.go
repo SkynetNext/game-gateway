@@ -10,6 +10,8 @@ import (
 
 	"github.com/SkynetNext/game-gateway/internal/config"
 	"github.com/SkynetNext/game-gateway/internal/gateway"
+	"github.com/SkynetNext/game-gateway/internal/logger"
+	"go.uber.org/zap"
 )
 
 var (
@@ -23,10 +25,16 @@ func main() {
 	flag.StringVar(&configPath, "config", "config/config.yaml", "Configuration file path")
 	flag.Parse()
 
+	// Initialize logger
+	if err := logger.Init("info"); err != nil {
+		log.Fatalf("Failed to initialize logger: %v", err)
+	}
+	defer logger.Sync()
+
 	// Load configuration
 	cfg, err := config.Load(configPath)
 	if err != nil {
-		log.Fatalf("Failed to load configuration: %v", err)
+		logger.L.Fatal("Failed to load configuration", zap.Error(err))
 	}
 
 	// Get Pod name (K8s environment)
@@ -35,13 +43,15 @@ func main() {
 		// Fallback: use hostname
 		hostname, _ := os.Hostname()
 		podName = hostname
-		log.Printf("POD_NAME environment variable not found, using hostname: %s", podName)
+		logger.L.Info("POD_NAME not found, using hostname",
+			zap.String("hostname", podName),
+		)
 	}
 
 	// Create gateway instance
 	gw, err := gateway.New(cfg, podName)
 	if err != nil {
-		log.Fatalf("Failed to create gateway: %v", err)
+		logger.L.Fatal("Failed to create gateway", zap.Error(err))
 	}
 
 	// Start gateway
@@ -50,26 +60,30 @@ func main() {
 
 	// Start service
 	if err := gw.Start(ctx); err != nil {
-		log.Fatalf("Failed to start gateway: %v", err)
+		logger.L.Fatal("Failed to start gateway", zap.Error(err))
 	}
 
-	log.Printf("Game Gateway started successfully (version: %s, build: %s, commit: %s, pod: %s)",
-		version, buildTime, gitCommit, podName)
+	logger.L.Info("Game Gateway started successfully",
+		zap.String("version", version),
+		zap.String("build_time", buildTime),
+		zap.String("git_commit", gitCommit),
+		zap.String("pod", podName),
+	)
 
 	// Wait for interrupt signal
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan
 
-	log.Println("Received stop signal, starting graceful shutdown...")
+	logger.L.Info("Received stop signal, starting graceful shutdown...")
 
 	// Graceful shutdown
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.GracefulShutdownTimeout)
 	defer shutdownCancel()
 
 	if err := gw.Shutdown(shutdownCtx); err != nil {
-		log.Printf("Error during gateway shutdown: %v", err)
+		logger.L.Error("Error during gateway shutdown", zap.Error(err))
 	}
 
-	log.Println("Game Gateway closed")
+	logger.L.Info("Game Gateway closed")
 }
