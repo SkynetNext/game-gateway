@@ -1,0 +1,426 @@
+# Game Gateway Monitoring Resources
+#
+# This file contains TWO independent resources:
+# 1. ServiceMonitor: For Prometheus Operator to auto-discover metrics endpoints
+# 2. ConfigMap: Grafana Dashboard JSON (requires manual import or Grafana sidecar)
+
+# ============================================================================
+# Resource 1: ServiceMonitor (for Prometheus)
+# ============================================================================
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: game-gateway
+  namespace: monitoring
+  labels:
+    app: game-gateway
+    release: kube-prometheus-stack # Must match Prometheus serviceMonitorSelector
+spec:
+  selector:
+    matchLabels:
+      app: game-gateway
+  namespaceSelector:
+    matchNames:
+      - hgame
+  endpoints:
+    - port: health
+      interval: 15s
+      path: /metrics
+      scheme: http
+
+---
+# ============================================================================
+# Resource 2: Grafana Dashboard ConfigMap
+# ============================================================================
+#
+# IMPORTANT: Dashboard Import Methods
+#
+# Option 1: Automatic Import (if Grafana has sidecar configured)
+#   - Grafana sidecar watches ConfigMaps with label "grafana_dashboard: 1"
+#   - Dashboard will be automatically imported
+#   - Check: kubectl get configmap -n monitoring -l grafana_dashboard=1
+#
+# Option 2: Manual Import (if sidecar not configured)
+#   1. Get dashboard JSON:
+#      kubectl get configmap game-gateway-grafana-dashboard -n monitoring -o jsonpath='{.data.game-gateway-dashboard\.json}' > dashboard.json
+#   2. In Grafana UI: Dashboards → Import → Upload JSON file
+#   3. Or copy JSON and paste in Grafana import dialog
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: game-gateway-grafana-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1" # Label for Grafana sidecar auto-discovery
+data:
+  game-gateway-dashboard.json: |
+    {
+      "id": null,
+      "uid": "game-gateway-dashboard",
+      "title": "Game Gateway - Performance & Health Metrics",
+      "tags": ["game-gateway", "gateway", "game"],
+      "style": "dark",
+      "timezone": "browser",
+      "schemaVersion": 16,
+      "version": 1,
+      "refresh": "30s",
+      "time": {
+        "from": "now-6h",
+        "to": "now"
+      },
+      "timepicker": {},
+      "templating": {
+        "list": []
+      },
+      "annotations": {
+        "list": []
+      },
+      "panels": [
+        {
+          "id": 1,
+          "title": "Active Connections",
+          "type": "stat",
+          "gridPos": {"h": 4, "w": 4, "x": 0, "y": 0},
+          "targets": [{
+            "expr": "sum(game_gateway_connections_active)",
+            "refId": "A"
+          }],
+          "fieldConfig": {
+            "defaults": {
+              "color": {"mode": "thresholds"},
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {"value": null, "color": "green"},
+                  {"value": 1000, "color": "yellow"},
+                  {"value": 5000, "color": "red"}
+                ]
+              },
+              "unit": "short"
+            }
+          }
+        },
+        {
+          "id": 2,
+          "title": "Total Connections",
+          "type": "stat",
+          "gridPos": {"h": 4, "w": 4, "x": 4, "y": 0},
+          "targets": [{
+            "expr": "sum(rate(game_gateway_connections_total[1m]))",
+            "refId": "A"
+          }],
+          "fieldConfig": {
+            "defaults": {
+              "color": {"mode": "thresholds"},
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {"value": null, "color": "green"},
+                  {"value": 100, "color": "yellow"},
+                  {"value": 1000, "color": "red"}
+                ]
+              },
+              "unit": "connps",
+              "decimals": 1
+            }
+          }
+        },
+        {
+          "id": 3,
+          "title": "Active Sessions",
+          "type": "stat",
+          "gridPos": {"h": 4, "w": 4, "x": 8, "y": 0},
+          "targets": [{
+            "expr": "sum(game_gateway_sessions_active)",
+            "refId": "A"
+          }],
+          "fieldConfig": {
+            "defaults": {
+              "color": {"mode": "thresholds"},
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {"value": null, "color": "green"},
+                  {"value": 500, "color": "yellow"},
+                  {"value": 2000, "color": "red"}
+                ]
+              },
+              "unit": "short"
+            }
+          }
+        },
+        {
+          "id": 4,
+          "title": "Rate Limit Rejected",
+          "type": "stat",
+          "gridPos": {"h": 4, "w": 4, "x": 12, "y": 0},
+          "targets": [{
+            "expr": "sum(rate(game_gateway_rate_limit_rejected_total[1m]))",
+            "refId": "A"
+          }],
+          "fieldConfig": {
+            "defaults": {
+              "color": {"mode": "thresholds"},
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {"value": null, "color": "green"},
+                  {"value": 1, "color": "yellow"},
+                  {"value": 10, "color": "red"}
+                ]
+              },
+              "unit": "reqps",
+              "decimals": 2
+            }
+          }
+        },
+        {
+          "id": 5,
+          "title": "Request Latency (P50/P95/P99)",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.50, sum(rate(game_gateway_request_latency_seconds_bucket[5m])) by (le, service_type))",
+              "legendFormat": "P50 - {{service_type}}",
+              "refId": "A"
+            },
+            {
+              "expr": "histogram_quantile(0.95, sum(rate(game_gateway_request_latency_seconds_bucket[5m])) by (le, service_type))",
+              "legendFormat": "P95 - {{service_type}}",
+              "refId": "B"
+            },
+            {
+              "expr": "histogram_quantile(0.99, sum(rate(game_gateway_request_latency_seconds_bucket[5m])) by (le, service_type))",
+              "legendFormat": "P99 - {{service_type}}",
+              "refId": "C"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {"mode": "palette-classic"},
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "fillOpacity": 10,
+                "pointSize": 5
+              },
+              "unit": "s",
+              "decimals": 3
+            }
+          }
+        },
+        {
+          "id": 6,
+          "title": "Messages Processed Rate",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+          "targets": [
+            {
+              "expr": "sum(rate(game_gateway_messages_processed_total{direction=\"client_to_backend\"}[1m])) by (service_type)",
+              "legendFormat": "Client→Backend - {{service_type}}",
+              "refId": "A"
+            },
+            {
+              "expr": "sum(rate(game_gateway_messages_processed_total{direction=\"backend_to_client\"}[1m])) by (service_type)",
+              "legendFormat": "Backend→Client - {{service_type}}",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {"mode": "palette-classic"},
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "fillOpacity": 10
+              },
+              "unit": "msgps"
+            }
+          }
+        },
+        {
+          "id": 7,
+          "title": "Routing Errors",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+          "targets": [
+            {
+              "expr": "sum(rate(game_gateway_routing_errors_total[1m])) by (error_type)",
+              "legendFormat": "{{error_type}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {"mode": "palette-classic"},
+              "custom": {
+                "drawStyle": "bars",
+                "fillOpacity": 80
+              },
+              "unit": "reqps"
+            }
+          }
+        },
+        {
+          "id": 8,
+          "title": "Circuit Breaker State",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+          "targets": [
+            {
+              "expr": "game_gateway_circuit_breaker_state",
+              "legendFormat": "{{backend}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {"mode": "thresholds"},
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {"value": null, "color": "green"},
+                  {"value": 1, "color": "red"},
+                  {"value": 2, "color": "yellow"}
+                ]
+              },
+              "unit": "short",
+              "min": 0,
+              "max": 2,
+              "mappings": [
+                {
+                  "options": {
+                    "0": {"text": "Closed"},
+                    "1": {"text": "Open"},
+                    "2": {"text": "Half-Open"}
+                  },
+                  "type": "value"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "id": 9,
+          "title": "Backend Connection Pool - Active",
+          "type": "timeseries",
+          "gridPos": {"h": 6, "w": 12, "x": 0, "y": 20},
+          "targets": [
+            {
+              "expr": "sum(game_gateway_backend_pool_active) by (backend)",
+              "legendFormat": "Active - {{backend}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {"mode": "palette-classic"},
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10
+              },
+              "unit": "short"
+            }
+          }
+        },
+        {
+          "id": 10,
+          "title": "Backend Connection Pool - Idle",
+          "type": "timeseries",
+          "gridPos": {"h": 6, "w": 12, "x": 12, "y": 20},
+          "targets": [
+            {
+              "expr": "sum(game_gateway_backend_pool_idle) by (backend)",
+              "legendFormat": "Idle - {{backend}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {"mode": "palette-classic"},
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10
+              },
+              "unit": "short"
+            }
+          }
+        },
+        {
+          "id": 11,
+          "title": "Pod Count",
+          "type": "stat",
+          "gridPos": {"h": 6, "w": 6, "x": 0, "y": 26},
+          "targets": [{
+            "expr": "count(up{job=\"game-gateway\"})",
+            "refId": "A"
+          }],
+          "fieldConfig": {
+            "defaults": {
+              "color": {"mode": "thresholds"},
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {"value": null, "color": "green"}
+                ]
+              },
+              "unit": "short"
+            }
+          }
+        },
+        {
+          "id": 12,
+          "title": "Connection Rate by Service Type",
+          "type": "timeseries",
+          "gridPos": {"h": 6, "w": 9, "x": 6, "y": 26},
+          "targets": [
+            {
+              "expr": "sum(rate(game_gateway_connections_total[1m]))",
+              "legendFormat": "Total Connections/sec",
+              "refId": "A"
+            },
+            {
+              "expr": "sum(game_gateway_connections_active)",
+              "legendFormat": "Active Connections",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {"mode": "palette-classic"},
+              "custom": {
+                "drawStyle": "line"
+              },
+              "unit": "short"
+            }
+          }
+        },
+        {
+          "id": 13,
+          "title": "Error Rate",
+          "type": "stat",
+          "gridPos": {"h": 6, "w": 9, "x": 15, "y": 26},
+          "targets": [{
+            "expr": "sum(rate(game_gateway_routing_errors_total[1m])) / sum(rate(game_gateway_connections_total[1m])) * 100",
+            "refId": "A"
+          }],
+          "fieldConfig": {
+            "defaults": {
+              "color": {"mode": "thresholds"},
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {"value": null, "color": "green"},
+                  {"value": 0.1, "color": "yellow"},
+                  {"value": 1, "color": "red"}
+                ]
+              },
+              "unit": "percent",
+              "decimals": 2
+            }
+          }
+        }
+      ]
+    }
