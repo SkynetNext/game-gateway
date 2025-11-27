@@ -126,16 +126,9 @@ func setDefaults(cfg *Config) {
 		cfg.Server.MetricsPort = 9091
 	}
 
-	// Allow Redis address to be overridden by environment variable
-	if redisAddr := os.Getenv("REDIS_ADDR"); redisAddr != "" {
-		cfg.Redis.Addr = redisAddr
-	} else if cfg.Redis.Addr == "" {
+	// Redis address from config file (no environment variable override)
+	if cfg.Redis.Addr == "" {
 		cfg.Redis.Addr = "localhost:6379"
-	}
-
-	// Allow Redis password to be overridden by environment variable
-	if redisPassword := os.Getenv("REDIS_PASSWORD"); redisPassword != "" {
-		cfg.Redis.Password = redisPassword
 	}
 
 	if cfg.Redis.KeyPrefix == "" {

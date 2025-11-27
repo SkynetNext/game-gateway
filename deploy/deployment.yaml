@@ -53,10 +53,6 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
-            - name: REDIS_ADDR
-              value: "10.1.0.8:6379"
-            - name: REDIS_PASSWORD
-              value: ""
           resources:
             requests:
               cpu: 1000m

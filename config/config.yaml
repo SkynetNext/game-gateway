@@ -6,7 +6,9 @@ server:
   metrics_port: 9091
 
 redis:
-  addr: "localhost:6379"
+  # Redis 地址：生产环境使用 K8s 集群内 Redis
+  # 开发环境可改为 localhost:6379
+  addr: "10.1.0.8:6379"
   password: ""
   db: 0
   key_prefix: "game-gateway:"
