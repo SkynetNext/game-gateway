@@ -1,10 +1,15 @@
 # Build stage
 FROM golang:1.21-alpine AS builder
 
-# Set Go proxy for China network (use goproxy.cn or direct)
-ENV GOPROXY=https://goproxy.cn,direct
-ENV CGO_ENABLED=0
-ENV GOOS=linux
+# Go build arguments (can be overridden at build time)
+ARG GOPROXY=https://proxy.golang.org,direct
+ARG CGO_ENABLED=0
+ARG GOOS=linux
+
+# Set as environment variables for use in RUN commands
+ENV GOPROXY=${GOPROXY}
+ENV CGO_ENABLED=${CGO_ENABLED}
+ENV GOOS=${GOOS}
 
 WORKDIR /build
 
