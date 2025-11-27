@@ -11,6 +11,7 @@ import (
 	"github.com/SkynetNext/game-gateway/internal/config"
 	"github.com/SkynetNext/game-gateway/internal/gateway"
 	"github.com/SkynetNext/game-gateway/internal/logger"
+	"github.com/SkynetNext/game-gateway/internal/tracing"
 	"go.uber.org/zap"
 )
 
@@ -25,8 +26,12 @@ func main() {
 	flag.StringVar(&configPath, "config", "config/config.yaml", "Configuration file path")
 	flag.Parse()
 
-	// Initialize logger
-	if err := logger.Init("info"); err != nil {
+	// Initialize logger (read from environment variable or use default)
+	logLevel := os.Getenv("LOG_LEVEL")
+	if logLevel == "" {
+		logLevel = "info"
+	}
+	if err := logger.Init(logLevel); err != nil {
 		log.Fatalf("Failed to initialize logger: %v", err)
 	}
 	defer logger.Sync()
@@ -63,6 +68,16 @@ func main() {
 		logger.L.Fatal("Failed to start gateway", zap.Error(err))
 	}
 
+	// Initialize tracing (optional, if Jaeger endpoint is provided)
+	jaegerEndpoint := os.Getenv("JAEGER_ENDPOINT")
+	if jaegerEndpoint != "" {
+		if err := tracing.Init("game-gateway", version, jaegerEndpoint); err != nil {
+			logger.L.Warn("Failed to initialize tracing", zap.Error(err))
+		} else {
+			logger.L.Info("Tracing initialized", zap.String("endpoint", jaegerEndpoint))
+		}
+	}
+
 	logger.L.Info("Game Gateway started successfully",
 		zap.String("version", version),
 		zap.String("build_time", buildTime),
@@ -83,6 +98,11 @@ func main() {
 
 	if err := gw.Shutdown(shutdownCtx); err != nil {
 		logger.L.Error("Error during gateway shutdown", zap.Error(err))
+	}
+
+	// Shutdown tracing
+	if err := tracing.Shutdown(shutdownCtx); err != nil {
+		logger.L.Warn("Error during tracing shutdown", zap.Error(err))
 	}
 
 	logger.L.Info("Game Gateway closed")

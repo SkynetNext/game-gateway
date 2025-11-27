@@ -1,17 +1,35 @@
 # Game Gateway
 
-A microservice-based game gateway service implemented in Go.
+A high-performance, production-ready game gateway service implemented in Go, following industry best practices.
 
 ## Features
 
+### Core Functionality
 - ✅ Multi-protocol support (HTTP/WebSocket/TCP)
-- ✅ Session management (in-memory storage, high performance)
-- ✅ Connection pooling (TCP connection reuse)
+- ✅ Session management (sharded in-memory storage, high performance)
+- ✅ Connection pooling (TCP connection reuse with O(1) retrieval)
 - ✅ Dynamic routing (Account/Version/Game service routing)
 - ✅ Realm-based routing mapping (based on realm_id)
 - ✅ Redis configuration management (routing rules, realm mapping)
+
+### Production Features
+- ✅ **Rate Limiting**: Connection rate limiting to prevent overload
+- ✅ **Circuit Breaker**: Automatic backend service failure detection and recovery
+- ✅ **Retry Mechanism**: Exponential backoff retry for transient failures
+- ✅ **Context Support**: Full context propagation with timeout control
+- ✅ **Connection Timeouts**: Configurable read/write timeouts
+- ✅ **Graceful Shutdown**: Drain mode with connection cleanup
+
+### Observability
+- ✅ **Structured Logging**: Zap-based structured logging
+- ✅ **Prometheus Metrics**: Comprehensive metrics collection
+- ✅ **Health Checks**: `/health` and `/ready` endpoints
+- ✅ **Distributed Tracing**: OpenTelemetry support (optional)
+
+### Infrastructure
 - ✅ Kubernetes integration (HPA support, Pod identification)
-- ✅ Protobuf protocol support
+- ✅ Configuration validation
+- ✅ Error handling and recovery
 
 ## Architecture
 
@@ -43,11 +61,23 @@ go build -o game-gateway ./cmd/gateway
 
 Configuration file: `config/config.yaml`
 
-Main configuration items:
-- Listen address
-- Redis connection
-- Backend service addresses
-- Routing rules (loaded from Redis)
+### Main Configuration Items
+
+- **Server**: Listen address, health check port, metrics port
+- **Redis**: Connection settings, pool configuration
+- **Backend Services**: Default service addresses
+- **Connection Pool**: Max connections, timeouts, retry settings
+- **Routing**: Refresh intervals for dynamic routing rules
+
+### Environment Variables
+
+- `LOG_LEVEL`: Logging level (debug, info, warn, error) - defaults to "info"
+- `POD_NAME`: Kubernetes Pod name (auto-injected)
+- `JAEGER_ENDPOINT`: Jaeger collector endpoint for tracing (optional)
+
+### Configuration Validation
+
+All configurations are validated on startup. Invalid configurations will cause the service to fail fast.
 
 ## Deployment
 

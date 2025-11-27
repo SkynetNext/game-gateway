@@ -39,6 +39,14 @@ connection_pool:
   idle_timeout: 5m
   # 连接建立超时
   dial_timeout: 5s
+  # 连接读取超时
+  read_timeout: 30s
+  # 连接写入超时
+  write_timeout: 30s
+  # 连接重试次数
+  max_retries: 3
+  # 重试延迟
+  retry_delay: 100ms
 
 # 优雅关闭超时
 graceful_shutdown_timeout: 30s

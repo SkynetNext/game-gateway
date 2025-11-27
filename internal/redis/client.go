@@ -146,12 +146,23 @@ func (c *Client) RefreshLoop(ctx context.Context, interval time.Duration, onRout
 			return
 		case <-ticker.C:
 			// Refresh routing rules
-			if rules, err := c.LoadRoutingRules(ctx); err == nil && onRoutingRules != nil {
+			rules, err := c.LoadRoutingRules(ctx)
+			if err != nil {
+				// Log error but continue (don't fail the refresh loop)
+				// In production, this should be logged with proper context
+				continue
+			}
+			if rules != nil && onRoutingRules != nil {
 				onRoutingRules(rules)
 			}
 
 			// Refresh realm mapping
-			if mapping, err := c.LoadRealmMapping(ctx); err == nil && onRealmMapping != nil {
+			mapping, err := c.LoadRealmMapping(ctx)
+			if err != nil {
+				// Log error but continue
+				continue
+			}
+			if mapping != nil && onRealmMapping != nil {
 				onRealmMapping(mapping)
 			}
 		}

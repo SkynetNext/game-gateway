@@ -92,6 +92,16 @@ type ConnectionPoolConfig struct {
 
 	// Connection dial timeout
 	DialTimeout time.Duration `yaml:"dial_timeout"`
+
+	// Connection read timeout
+	ReadTimeout time.Duration `yaml:"read_timeout"`
+
+	// Connection write timeout
+	WriteTimeout time.Duration `yaml:"write_timeout"`
+
+	// Retry configuration
+	MaxRetries int           `yaml:"max_retries"` // Maximum retry attempts for connection
+	RetryDelay time.Duration `yaml:"retry_delay"` // Delay between retries
 }
 
 // Load loads configuration from file
@@ -109,7 +119,54 @@ func Load(path string) (*Config, error) {
 	// Set default values
 	setDefaults(&cfg)
 
+	// Validate configuration
+	if err := validateConfig(&cfg); err != nil {
+		return nil, fmt.Errorf("invalid configuration: %w", err)
+	}
+
 	return &cfg, nil
+}
+
+// validateConfig validates the configuration
+func validateConfig(cfg *Config) error {
+	// Validate server configuration
+	if cfg.Server.ListenAddr == "" {
+		return fmt.Errorf("server.listen_addr is required")
+	}
+	if cfg.Server.HealthCheckPort <= 0 || cfg.Server.HealthCheckPort > 65535 {
+		return fmt.Errorf("server.health_check_port must be between 1 and 65535")
+	}
+
+	// Validate Redis configuration
+	if cfg.Redis.Addr == "" {
+		return fmt.Errorf("redis.addr is required")
+	}
+	if cfg.Redis.PoolSize <= 0 {
+		return fmt.Errorf("redis.pool_size must be greater than 0")
+	}
+
+	// Validate connection pool configuration
+	if cfg.ConnectionPool.MaxConnections <= 0 {
+		return fmt.Errorf("connection_pool.max_connections must be greater than 0")
+	}
+	if cfg.ConnectionPool.MaxConnectionsPerService <= 0 {
+		return fmt.Errorf("connection_pool.max_connections_per_service must be greater than 0")
+	}
+	if cfg.ConnectionPool.DialTimeout <= 0 {
+		return fmt.Errorf("connection_pool.dial_timeout must be greater than 0")
+	}
+
+	// Validate routing configuration
+	if cfg.Routing.RefreshInterval <= 0 {
+		return fmt.Errorf("routing.refresh_interval must be greater than 0")
+	}
+
+	// Validate graceful shutdown timeout
+	if cfg.GracefulShutdownTimeout <= 0 {
+		return fmt.Errorf("graceful_shutdown_timeout must be greater than 0")
+	}
+
+	return nil
 }
 
 // setDefaults sets default values for configuration
@@ -177,6 +234,22 @@ func setDefaults(cfg *Config) {
 
 	if cfg.ConnectionPool.DialTimeout == 0 {
 		cfg.ConnectionPool.DialTimeout = 5 * time.Second
+	}
+
+	if cfg.ConnectionPool.ReadTimeout == 0 {
+		cfg.ConnectionPool.ReadTimeout = 30 * time.Second
+	}
+
+	if cfg.ConnectionPool.WriteTimeout == 0 {
+		cfg.ConnectionPool.WriteTimeout = 30 * time.Second
+	}
+
+	if cfg.ConnectionPool.MaxRetries == 0 {
+		cfg.ConnectionPool.MaxRetries = 3
+	}
+
+	if cfg.ConnectionPool.RetryDelay == 0 {
+		cfg.ConnectionPool.RetryDelay = 100 * time.Millisecond
 	}
 
 	if cfg.GracefulShutdownTimeout == 0 {

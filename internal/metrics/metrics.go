@@ -29,6 +29,18 @@ var (
 		Help: "Total number of routing errors",
 	}, []string{"error_type"})
 
+	// Rate limiting metrics
+	RateLimitRejected = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "game_gateway_rate_limit_rejected_total",
+		Help: "Total number of connections rejected by rate limiter",
+	})
+
+	// Circuit breaker metrics
+	CircuitBreakerState = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "game_gateway_circuit_breaker_state",
+		Help: "Circuit breaker state (0=closed, 1=open, 2=half-open)",
+	}, []string{"backend"})
+
 	// Backend connection pool metrics
 	BackendPoolActive = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "game_gateway_backend_pool_active",

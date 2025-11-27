@@ -13,12 +13,15 @@ import (
 	"time"
 
 	"github.com/SkynetNext/game-gateway/internal/buffer"
+	"github.com/SkynetNext/game-gateway/internal/circuitbreaker"
 	"github.com/SkynetNext/game-gateway/internal/config"
 	"github.com/SkynetNext/game-gateway/internal/logger"
 	"github.com/SkynetNext/game-gateway/internal/metrics"
 	"github.com/SkynetNext/game-gateway/internal/pool"
 	"github.com/SkynetNext/game-gateway/internal/protocol"
+	"github.com/SkynetNext/game-gateway/internal/ratelimit"
 	"github.com/SkynetNext/game-gateway/internal/redis"
+	"github.com/SkynetNext/game-gateway/internal/retry"
 	"github.com/SkynetNext/game-gateway/internal/router"
 	"github.com/SkynetNext/game-gateway/internal/session"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -35,6 +38,11 @@ type Gateway struct {
 	poolManager    *pool.Manager
 	router         *router.Router
 	redisClient    *redis.Client
+
+	// Rate limiting and circuit breaking
+	rateLimiter     *ratelimit.Limiter
+	circuitBreakers map[string]*circuitbreaker.Breaker // backend address -> breaker
+	breakerMu       sync.RWMutex
 
 	// Network
 	listener      net.Listener
@@ -68,15 +76,20 @@ func New(cfg *config.Config, podName string) (*Gateway, error) {
 	// Compute podHash once at startup
 	podHash := uint16(crc32.ChecksumIEEE([]byte(podName)) & 0xFFFF)
 
+	// Initialize rate limiter (use max_connections from config)
+	rateLimiter := ratelimit.NewLimiter(int64(cfg.ConnectionPool.MaxConnections))
+
 	return &Gateway{
-		config:         cfg,
-		podName:        podName,
-		startTime:      time.Now().Unix(),
-		podHash:        podHash,
-		sessionManager: sessionMgr,
-		poolManager:    poolMgr,
-		router:         rtr,
-		redisClient:    redisCli,
+		config:          cfg,
+		podName:         podName,
+		startTime:       time.Now().Unix(),
+		podHash:         podHash,
+		sessionManager:  sessionMgr,
+		poolManager:     poolMgr,
+		router:          rtr,
+		redisClient:     redisCli,
+		rateLimiter:     rateLimiter,
+		circuitBreakers: make(map[string]*circuitbreaker.Breaker),
 	}, nil
 }
 
@@ -260,22 +273,48 @@ func (g *Gateway) startListener(ctx context.Context) error {
 // acceptLoop accepts incoming connections
 func (g *Gateway) acceptLoop(ctx context.Context) {
 	for {
-		conn, err := g.listener.Accept()
-		if err != nil {
-			// Check if listener was closed (normal shutdown)
-			if atomic.LoadInt32(&g.draining) == 1 {
-				return
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			// Set accept timeout to allow context cancellation check
+			if tcpListener, ok := g.listener.(*net.TCPListener); ok {
+				tcpListener.SetDeadline(time.Now().Add(1 * time.Second))
 			}
-			// Log error and continue
-			continue
-		}
 
-		// Handle connection in goroutine
-		g.wg.Add(1)
-		go func(c net.Conn) {
-			defer g.wg.Done()
-			g.handleConnection(ctx, c)
-		}(conn)
+			conn, err := g.listener.Accept()
+			if err != nil {
+				// Check if listener was closed (normal shutdown)
+				if atomic.LoadInt32(&g.draining) == 1 {
+					return
+				}
+				// Check for timeout (expected when checking context)
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					continue
+				}
+				// Log other errors
+				logger.L.Warn("accept connection error",
+					zap.Error(err),
+				)
+				continue
+			}
+
+			// Set connection timeouts
+			if err := conn.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
+				conn.Close()
+				logger.L.Debug("failed to set initial read deadline",
+					zap.Error(err),
+				)
+				continue
+			}
+
+			// Handle connection in goroutine
+			g.wg.Add(1)
+			go func(c net.Conn) {
+				defer g.wg.Done()
+				g.handleConnection(ctx, c)
+			}(conn)
+		}
 	}
 }
 
@@ -284,6 +323,19 @@ func (g *Gateway) handleConnection(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 
 	remoteAddr := conn.RemoteAddr().String()
+
+	// Rate limiting: check if connection is allowed
+	if !g.rateLimiter.Allow() {
+		logger.L.Warn("connection rate limit exceeded",
+			zap.String("remote_addr", remoteAddr),
+			zap.Int64("max_connections", g.rateLimiter.Max()),
+			zap.Int64("current_connections", g.rateLimiter.Current()),
+		)
+		metrics.RateLimitRejected.Inc()
+		return
+	}
+	defer g.rateLimiter.Release()
+
 	metrics.TotalConnections.Inc()
 	metrics.ActiveConnections.Inc()
 	defer metrics.ActiveConnections.Dec()
@@ -362,10 +414,35 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn *protocol.SniffC
 		return
 	}
 
-	// Get connection from pool
-	backendConn, err := g.poolManager.GetConnection(ctx, backendAddr)
+	// Check circuit breaker
+	breaker := g.getOrCreateBreaker(backendAddr)
+	if !breaker.Allow() {
+		logger.L.Warn("circuit breaker is open",
+			zap.String("remote_addr", remoteAddr),
+			zap.String("backend_addr", backendAddr),
+		)
+		metrics.RoutingErrors.WithLabelValues("circuit_breaker_open").Inc()
+		return
+	}
+
+	// Get connection from pool with retry
+	var backendConn *pool.Connection
+	retryCfg := retry.RetryConfig{
+		MaxRetries: g.config.ConnectionPool.MaxRetries,
+		RetryDelay: g.config.ConnectionPool.RetryDelay,
+	}
+	err = retry.Do(ctx, retryCfg, func() error {
+		var err error
+		backendConn, err = g.poolManager.GetConnection(ctx, backendAddr)
+		if err == nil {
+			breaker.RecordSuccess()
+		} else {
+			breaker.RecordFailure()
+		}
+		return err
+	})
 	if err != nil {
-		logger.L.Error("failed to get backend connection",
+		logger.L.Error("failed to get backend connection after retries",
 			zap.String("remote_addr", remoteAddr),
 			zap.String("backend_addr", backendAddr),
 			zap.Error(err),
@@ -375,13 +452,17 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn *protocol.SniffC
 	}
 	defer g.poolManager.PutConnection(backendAddr, backendConn)
 
+	// Record request latency
+	latency := time.Since(startTime)
+	metrics.RequestLatency.WithLabelValues(fmt.Sprintf("%d", serverType)).Observe(latency.Seconds())
+
 	logger.L.Info("session established",
 		zap.Int64("session_id", sessionID),
 		zap.String("remote_addr", remoteAddr),
 		zap.String("backend_addr", backendAddr),
 		zap.Int("server_type", int(serverType)),
 		zap.Int("world_id", int(worldID)),
-		zap.Duration("latency", time.Since(startTime)),
+		zap.Duration("latency", latency),
 	)
 
 	// Send first message to backend
@@ -437,169 +518,231 @@ func (g *Gateway) routeToBackend(ctx context.Context, serverType, worldID, instI
 
 // forwardConnection forwards data bidirectionally between client and backend
 // Optimized: uses bufio for buffered I/O to reduce system calls
-func (g *Gateway) forwardConnection(_ context.Context, sess *session.Session) {
+// Fixed: adds context support for cancellation and timeout control
+func (g *Gateway) forwardConnection(ctx context.Context, sess *session.Session) {
+	// Set connection timeouts
+	readTimeout := 30 * time.Second
+	writeTimeout := 30 * time.Second
+
 	// Create buffered readers/writers for better I/O performance
 	clientReader := protocol.NewSniffConn(sess.ClientConn) // Already has buffering
 	backendWriter := sess.BackendConn
 
+	// Use context with timeout for connection lifecycle
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	// Forward client -> backend
 	go func() {
+		defer cancel()
 		defer sess.BackendConn.Close()
+
+		// Set periodic read deadline
+		ticker := time.NewTicker(readTimeout / 2)
+		defer ticker.Stop()
+
 		for {
-			// Read complete client packet
-			clientHeader, messageData, err := protocol.ReadFullPacket(clientReader)
-			if err != nil {
-				if err != io.EOF {
-					logger.L.Debug("client read error",
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				// Refresh read deadline
+				if err := sess.ClientConn.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
+					return
+				}
+			default:
+				// Read complete client packet
+				clientHeader, messageData, err := protocol.ReadFullPacket(clientReader)
+				if err != nil {
+					if err != io.EOF {
+						logger.L.Debug("client read error",
+							zap.Int64("session_id", sess.SessionID),
+							zap.Error(err),
+						)
+					}
+					return
+				}
+
+				// Update last active time
+				sess.LastActiveAt = time.Now()
+
+				// Set write deadline before writing
+				if err := backendWriter.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
+					logger.L.Debug("failed to set write deadline",
 						zap.Int64("session_id", sess.SessionID),
 						zap.Error(err),
 					)
+					return
 				}
-				return
+
+				// Write to backend in server message format
+				if err := protocol.WriteServerMessage(backendWriter, int32(clientHeader.MessageID), sess.SessionID, messageData); err != nil {
+					logger.L.Debug("backend write error",
+						zap.Int64("session_id", sess.SessionID),
+						zap.Error(err),
+					)
+					return
+				}
+
+				metrics.MessagesProcessed.WithLabelValues("client_to_backend", sess.ServiceType).Inc()
 			}
-
-			// Update last active time
-			sess.LastActiveAt = time.Now()
-
-			// Write to backend in server message format
-			if err := protocol.WriteServerMessage(backendWriter, int32(clientHeader.MessageID), sess.SessionID, messageData); err != nil {
-				logger.L.Debug("backend write error",
-					zap.Int64("session_id", sess.SessionID),
-					zap.Error(err),
-				)
-				return
-			}
-
-			metrics.MessagesProcessed.WithLabelValues("client_to_backend", sess.ServiceType).Inc()
 		}
 	}()
 
 	// Forward backend -> client
 	// Backend sends server message format, we need to extract and forward to client
 	defer sess.ClientConn.Close()
+
+	// Set initial read deadline
+	if err := sess.BackendConn.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
+		logger.L.Debug("failed to set initial read deadline",
+			zap.Int64("session_id", sess.SessionID),
+			zap.Error(err),
+		)
+		return
+	}
+
 	for {
-		// Read server message header (16 bytes) - optimized: single ReadFull call
-		serverHeader, err := protocol.ReadServerMessageHeader(sess.BackendConn)
-		if err != nil {
-			if err != io.EOF {
-				logger.L.Debug("backend read error",
-					zap.Int64("session_id", sess.SessionID),
-					zap.Error(err),
-				)
-			}
+		select {
+		case <-ctx.Done():
 			return
-		}
-
-		// Read Gate message header (9 bytes) - optimized: single ReadFull call
-		gateHeader, err := protocol.ReadGateMsgHeader(sess.BackendConn)
-		if err != nil {
-			if err != io.EOF {
-				logger.L.Debug("gate header read error",
-					zap.Int64("session_id", sess.SessionID),
-					zap.Error(err),
-				)
+		default:
+			// Refresh read deadline periodically
+			if err := sess.BackendConn.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
+				return
 			}
-			return
-		}
-		_ = gateHeader.OpCode // OpCode (currently not used, but read for protocol correctness)
 
-		// Calculate message data length: totalLength - GateMsgHeaderSize
-		messageDataLen := int(serverHeader.Length) - protocol.GateMsgHeaderSize
-		if messageDataLen < 0 {
-			logger.L.Warn("invalid message length",
-				zap.Int64("session_id", sess.SessionID),
-				zap.Int32("total_length", serverHeader.Length),
-			)
-			return
-		}
-
-		// Read message data - use buffer pool for large messages
-		var messageData []byte
-		var pooledBuf []byte
-		if messageDataLen > 0 {
-			if messageDataLen <= 8192 {
-				// Use buffer pool for messages <= 8KB
-				pooledBuf = buffer.Get()
-				messageData = pooledBuf[:messageDataLen]
-			} else {
-				// Allocate new buffer for large messages
-				messageData = make([]byte, messageDataLen)
-			}
-			if _, err := io.ReadFull(sess.BackendConn, messageData); err != nil {
-				// Return buffer to pool if it was pooled
-				if pooledBuf != nil {
-					buffer.Put(pooledBuf)
-				}
+			// Read server message header (16 bytes) - optimized: single ReadFull call
+			serverHeader, err := protocol.ReadServerMessageHeader(sess.BackendConn)
+			if err != nil {
 				if err != io.EOF {
-					logger.L.Debug("message data read error",
+					logger.L.Debug("backend read error",
 						zap.Int64("session_id", sess.SessionID),
-						zap.Int("data_len", messageDataLen),
 						zap.Error(err),
 					)
 				}
 				return
 			}
-		}
 
-		// Write to client in client message format
-		// Client format: [length(2)] [messageId(2)] [serverId(4)] [data]
-		// We need to reconstruct serverId from session info or use 0
-		clientHeader := protocol.ClientMessageHeader{
-			Length:    uint16(messageDataLen),
-			MessageID: uint16(serverHeader.Type),
-			ServerID:  0, // Can be reconstructed if needed
-		}
-		if err := binary.Write(sess.ClientConn, binary.LittleEndian, clientHeader.Length); err != nil {
-			if pooledBuf != nil {
-				buffer.Put(pooledBuf)
+			// Read Gate message header (9 bytes) - optimized: single ReadFull call
+			gateHeader, err := protocol.ReadGateMsgHeader(sess.BackendConn)
+			if err != nil {
+				if err != io.EOF {
+					logger.L.Debug("gate header read error",
+						zap.Int64("session_id", sess.SessionID),
+						zap.Error(err),
+					)
+				}
+				return
 			}
-			logger.L.Debug("client write error (length)",
-				zap.Int64("session_id", sess.SessionID),
-				zap.Error(err),
-			)
-			return
-		}
-		if err := binary.Write(sess.ClientConn, binary.LittleEndian, clientHeader.MessageID); err != nil {
-			if pooledBuf != nil {
-				buffer.Put(pooledBuf)
+			_ = gateHeader.OpCode // OpCode (currently not used, but read for protocol correctness)
+
+			// Calculate message data length: totalLength - GateMsgHeaderSize
+			messageDataLen := int(serverHeader.Length) - protocol.GateMsgHeaderSize
+			if messageDataLen < 0 {
+				logger.L.Warn("invalid message length",
+					zap.Int64("session_id", sess.SessionID),
+					zap.Int32("total_length", serverHeader.Length),
+				)
+				return
 			}
-			logger.L.Debug("client write error (message_id)",
-				zap.Int64("session_id", sess.SessionID),
-				zap.Error(err),
-			)
-			return
-		}
-		if err := binary.Write(sess.ClientConn, binary.LittleEndian, clientHeader.ServerID); err != nil {
-			if pooledBuf != nil {
-				buffer.Put(pooledBuf)
+
+			// Read message data - use buffer pool for large messages
+			var messageData []byte
+			var pooledBuf []byte
+			if messageDataLen > 0 {
+				if messageDataLen <= 8192 {
+					// Use buffer pool for messages <= 8KB
+					pooledBuf = buffer.Get()
+					messageData = pooledBuf[:messageDataLen]
+				} else {
+					// Allocate new buffer for large messages
+					messageData = make([]byte, messageDataLen)
+				}
+				if _, err := io.ReadFull(sess.BackendConn, messageData); err != nil {
+					// Return buffer to pool if it was pooled
+					if pooledBuf != nil {
+						buffer.Put(pooledBuf)
+					}
+					if err != io.EOF {
+						logger.L.Debug("message data read error",
+							zap.Int64("session_id", sess.SessionID),
+							zap.Int("data_len", messageDataLen),
+							zap.Error(err),
+						)
+					}
+					return
+				}
 			}
-			logger.L.Debug("client write error (server_id)",
-				zap.Int64("session_id", sess.SessionID),
-				zap.Error(err),
-			)
-			return
-		}
-		if len(messageData) > 0 {
-			if _, err := sess.ClientConn.Write(messageData); err != nil {
+
+			// Set write deadline before writing to client
+			if err := sess.ClientConn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
 				if pooledBuf != nil {
 					buffer.Put(pooledBuf)
 				}
-				logger.L.Debug("client write error (data)",
+				return
+			}
+
+			// Write to client in client message format
+			// Client format: [length(2)] [messageId(2)] [serverId(4)] [data]
+			// We need to reconstruct serverId from session info or use 0
+			clientHeader := protocol.ClientMessageHeader{
+				Length:    uint16(messageDataLen),
+				MessageID: uint16(serverHeader.Type),
+				ServerID:  0, // Can be reconstructed if needed
+			}
+			if err := binary.Write(sess.ClientConn, binary.LittleEndian, clientHeader.Length); err != nil {
+				if pooledBuf != nil {
+					buffer.Put(pooledBuf)
+				}
+				logger.L.Debug("client write error (length)",
 					zap.Int64("session_id", sess.SessionID),
 					zap.Error(err),
 				)
 				return
 			}
-		}
+			if err := binary.Write(sess.ClientConn, binary.LittleEndian, clientHeader.MessageID); err != nil {
+				if pooledBuf != nil {
+					buffer.Put(pooledBuf)
+				}
+				logger.L.Debug("client write error (message_id)",
+					zap.Int64("session_id", sess.SessionID),
+					zap.Error(err),
+				)
+				return
+			}
+			if err := binary.Write(sess.ClientConn, binary.LittleEndian, clientHeader.ServerID); err != nil {
+				if pooledBuf != nil {
+					buffer.Put(pooledBuf)
+				}
+				logger.L.Debug("client write error (server_id)",
+					zap.Int64("session_id", sess.SessionID),
+					zap.Error(err),
+				)
+				return
+			}
+			if len(messageData) > 0 {
+				if _, err := sess.ClientConn.Write(messageData); err != nil {
+					if pooledBuf != nil {
+						buffer.Put(pooledBuf)
+					}
+					logger.L.Debug("client write error (data)",
+						zap.Int64("session_id", sess.SessionID),
+						zap.Error(err),
+					)
+					return
+				}
+			}
 
-		// Return buffer to pool after use (if it was pooled)
-		if pooledBuf != nil {
-			buffer.Put(pooledBuf)
-		}
+			// Return buffer to pool after use (if it was pooled)
+			if pooledBuf != nil {
+				buffer.Put(pooledBuf)
+			}
 
-		// Update last active time
-		sess.LastActiveAt = time.Now()
-		metrics.MessagesProcessed.WithLabelValues("backend_to_client", sess.ServiceType).Inc()
+			// Update last active time
+			sess.LastActiveAt = time.Now()
+			metrics.MessagesProcessed.WithLabelValues("backend_to_client", sess.ServiceType).Inc()
+		}
 	}
 }
 
