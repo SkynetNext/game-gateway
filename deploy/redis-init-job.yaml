@@ -41,15 +41,15 @@ spec:
               echo "Prefix: $REDIS_PREFIX"
               echo ""
 
-              # Load routing rules from ConfigMap
-              echo "==> Loading routing rules from ConfigMap..."
-              if [ ! -f /config/routing-rules.json ]; then
-                echo "❌ routing-rules.json not found in ConfigMap"
+              # Load routing rules from environment variable
+              echo "==> Loading routing rules from environment..."
+              if [ -z "$ROUTING_RULES_JSON" ]; then
+                echo "❌ ROUTING_RULES_JSON environment variable not set"
                 exit 1
               fi
 
-              # Read JSON from ConfigMap
-              ROUTING_JSON=$(cat /config/routing-rules.json)
+              # Use routing rules from environment variable
+              ROUTING_JSON="$ROUTING_RULES_JSON"
 
               # Validate JSON format
               echo "$ROUTING_JSON" | grep -q "server_type" || {
@@ -92,11 +92,5 @@ spec:
                   name: game-gateway-secrets
                   key: redis-password
                   optional: true
-          volumeMounts:
-            - name: config
-              mountPath: /config
-              readOnly: true
-      volumes:
-        - name: config
-          configMap:
-            name: game-gateway-routing-rules
+            - name: ROUTING_RULES_JSON
+              value: "" # Will be set by Jenkinsfile
