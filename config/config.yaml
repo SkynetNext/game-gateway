@@ -48,5 +48,14 @@ connection_pool:
   # 重试延迟
   retry_delay: 100ms
 
+# 安全配置
+security:
+  # 最大消息大小（字节），防止 DoS 攻击
+  max_message_size: 1048576 # 1MB
+  # 每个 IP 的最大连接数
+  max_connections_per_ip: 10
+  # 每个 IP 的连接速率限制（每秒连接数）
+  connection_rate_limit: 5
+
 # 优雅关闭超时
 graceful_shutdown_timeout: 30s

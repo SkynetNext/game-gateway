@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/SkynetNext/game-gateway/internal/pool"
+	"github.com/SkynetNext/game-gateway/internal/ratelimit"
+	"github.com/SkynetNext/game-gateway/internal/session"
 )
 
 func BenchmarkPool_Get(b *testing.B) {
@@ -33,8 +35,59 @@ func BenchmarkPool_Get(b *testing.B) {
 	})
 }
 
+func BenchmarkLimiter_Allow(b *testing.B) {
+	limiter := ratelimit.NewLimiter(1000)
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			if limiter.Allow() {
+				limiter.Release()
+			}
+		}
+	})
+}
+
 func BenchmarkSessionManager_AddGet(b *testing.B) {
-	// This would require importing session package
-	// For now, just a placeholder
-	b.Skip("Requires session package implementation")
+	mgr := session.NewManager()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := int64(0)
+		for pb.Next() {
+			sess := &session.Session{
+				SessionID:    i,
+				ServiceType:  "test",
+				CreatedAt:    time.Now(),
+				LastActiveAt: time.Now(),
+				State:        session.SessionStateConnected,
+			}
+			mgr.Add(sess)
+			mgr.Get(sess.SessionID)
+			mgr.Remove(sess.SessionID)
+			i++
+		}
+	})
+}
+
+func BenchmarkSessionManager_Get(b *testing.B) {
+	mgr := session.NewManager()
+	// Pre-populate with sessions
+	for i := int64(0); i < 1000; i++ {
+		sess := &session.Session{
+			SessionID:    i,
+			ServiceType:  "test",
+			CreatedAt:    time.Now(),
+			LastActiveAt: time.Now(),
+			State:        session.SessionStateConnected,
+		}
+		mgr.Add(sess)
+	}
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := int64(0)
+		for pb.Next() {
+			mgr.Get(i % 1000)
+			i++
+		}
+	})
 }

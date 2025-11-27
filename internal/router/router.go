@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"sync"
+	"sync/atomic"
 
 	"github.com/SkynetNext/game-gateway/internal/config"
 )
@@ -36,7 +37,8 @@ type Router struct {
 	rules map[string]*RoutingRule // key format: "serverType:worldID" (worldID=0 means wildcard)
 
 	// Round-robin counters per service type (key format: "serverType:worldID")
-	roundRobinCounters map[string]int
+	// Optimized: use atomic operations for better performance
+	roundRobinCounters map[string]*int64
 }
 
 // NewRouter creates a new router instance
@@ -44,7 +46,7 @@ func NewRouter(cfg *config.RoutingConfig) *Router {
 	return &Router{
 		config:             cfg,
 		rules:              make(map[string]*RoutingRule),
-		roundRobinCounters: make(map[string]int),
+		roundRobinCounters: make(map[string]*int64),
 	}
 }
 
@@ -138,14 +140,31 @@ func (r *Router) RouteByServerID(ctx context.Context, serverType, worldID, instI
 }
 
 // routeRoundRobin routes using round-robin algorithm
+// Optimized: uses atomic operations for better concurrency performance
 func (r *Router) routeRoundRobin(serverType, worldID int, rule *RoutingRule) (string, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	key := makeRuleKey(serverType, worldID)
-	count := r.roundRobinCounters[key]
-	endpoint := rule.Endpoints[count%len(rule.Endpoints)]
-	r.roundRobinCounters[key] = (count + 1) % len(rule.Endpoints)
+
+	// Get or create counter atomically
+	r.mu.RLock()
+	counter, ok := r.roundRobinCounters[key]
+	r.mu.RUnlock()
+
+	if !ok {
+		// Need to create counter
+		r.mu.Lock()
+		// Double-check
+		counter, ok = r.roundRobinCounters[key]
+		if !ok {
+			var initCount int64
+			counter = &initCount
+			r.roundRobinCounters[key] = counter
+		}
+		r.mu.Unlock()
+	}
+
+	// Atomically increment and get value
+	count := atomic.AddInt64(counter, 1) - 1
+	endpoint := rule.Endpoints[int(count)%len(rule.Endpoints)]
 
 	return endpoint, nil
 }

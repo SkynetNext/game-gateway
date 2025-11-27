@@ -25,6 +25,9 @@ type Config struct {
 	// Connection pool configuration
 	ConnectionPool ConnectionPoolConfig `yaml:"connection_pool"`
 
+	// Security configuration
+	Security SecurityConfig `yaml:"security"`
+
 	// Graceful shutdown timeout
 	GracefulShutdownTimeout time.Duration `yaml:"graceful_shutdown_timeout"`
 }
@@ -104,6 +107,18 @@ type ConnectionPoolConfig struct {
 	RetryDelay time.Duration `yaml:"retry_delay"` // Delay between retries
 }
 
+// SecurityConfig represents security configuration
+type SecurityConfig struct {
+	// Maximum message size (in bytes) to prevent DoS attacks
+	MaxMessageSize int `yaml:"max_message_size"`
+
+	// Maximum connections per IP address
+	MaxConnectionsPerIP int `yaml:"max_connections_per_ip"`
+
+	// Connection rate limit (connections per second per IP)
+	ConnectionRateLimit int `yaml:"connection_rate_limit"`
+}
+
 // Load loads configuration from file
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -125,6 +140,11 @@ func Load(path string) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+// ValidateConfig validates the configuration (exported for hot reload)
+func ValidateConfig(cfg *Config) error {
+	return validateConfig(cfg)
 }
 
 // validateConfig validates the configuration
@@ -254,5 +274,16 @@ func setDefaults(cfg *Config) {
 
 	if cfg.GracefulShutdownTimeout == 0 {
 		cfg.GracefulShutdownTimeout = 30 * time.Second
+	}
+
+	// Security defaults
+	if cfg.Security.MaxMessageSize == 0 {
+		cfg.Security.MaxMessageSize = 1024 * 1024 // 1MB default
+	}
+	if cfg.Security.MaxConnectionsPerIP == 0 {
+		cfg.Security.MaxConnectionsPerIP = 10 // 10 connections per IP default
+	}
+	if cfg.Security.ConnectionRateLimit == 0 {
+		cfg.Security.ConnectionRateLimit = 5 // 5 connections per second per IP
 	}
 }

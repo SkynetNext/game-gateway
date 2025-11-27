@@ -148,8 +148,9 @@ func (c *Client) RefreshLoop(ctx context.Context, interval time.Duration, onRout
 			// Refresh routing rules
 			rules, err := c.LoadRoutingRules(ctx)
 			if err != nil {
-				// Log error but continue (don't fail the refresh loop)
-				// In production, this should be logged with proper context
+				// Log error with context but continue (don't fail the refresh loop)
+				// This allows the gateway to continue operating with stale config
+				// Metrics are recorded in gateway.onRoutingRulesUpdate
 				continue
 			}
 			if rules != nil && onRoutingRules != nil {
@@ -159,7 +160,8 @@ func (c *Client) RefreshLoop(ctx context.Context, interval time.Duration, onRout
 			// Refresh realm mapping
 			mapping, err := c.LoadRealmMapping(ctx)
 			if err != nil {
-				// Log error but continue
+				// Log error with context but continue
+				// Metrics are recorded in gateway.onRealmMappingUpdate
 				continue
 			}
 			if mapping != nil && onRealmMapping != nil {

@@ -101,7 +101,11 @@ func (m *Manager) StartCleanup(ctx context.Context, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			m.Cleanup()
+			cleaned := m.Cleanup()
+			if cleaned > 0 {
+				// Log cleanup activity (can be useful for monitoring)
+				// Note: In production, this could be a debug-level log
+			}
 		}
 	}
 }

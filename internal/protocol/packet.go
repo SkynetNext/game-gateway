@@ -2,7 +2,11 @@ package protocol
 
 import (
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"io"
+
+	"github.com/SkynetNext/game-gateway/internal/buffer"
 )
 
 const (
@@ -132,14 +136,25 @@ func WriteGateMsgHeader(w io.Writer, header *GateMsgHeader) error {
 	return nil
 }
 
+var (
+	// ErrMessageTooLarge is returned when message size exceeds maximum allowed
+	ErrMessageTooLarge = errors.New("message size exceeds maximum allowed")
+)
+
 // ReadFullPacket reads a complete client message packet
 // Returns: header, message data, error
 // Optimized: uses buffer pool for message data allocation
-func ReadFullPacket(r io.Reader) (*ClientMessageHeader, []byte, error) {
+// Security: validates message size to prevent DoS attacks
+func ReadFullPacket(r io.Reader, maxMessageSize int) (*ClientMessageHeader, []byte, error) {
 	// Read header (8 bytes)
 	header, err := ParseClientMessageHeader(r)
 	if err != nil {
 		return nil, nil, err
+	}
+
+	// Validate message size to prevent DoS
+	if maxMessageSize > 0 && int(header.Length) > maxMessageSize {
+		return nil, nil, fmt.Errorf("%w: %d bytes (max: %d)", ErrMessageTooLarge, header.Length, maxMessageSize)
 	}
 
 	// Read message data
@@ -147,12 +162,29 @@ func ReadFullPacket(r io.Reader) (*ClientMessageHeader, []byte, error) {
 		return header, nil, nil
 	}
 
-	// Allocate buffer for message data
-	data := make([]byte, header.Length)
+	// Use buffer pool for message data allocation
+	var data []byte
+	var pooledBuf []byte
+	if int(header.Length) <= 8192 {
+		// Use buffer pool for messages <= 8KB
+		pooledBuf = buffer.Get()
+		data = pooledBuf[:header.Length]
+	} else {
+		// Allocate new buffer for large messages
+		data = make([]byte, header.Length)
+	}
+
 	if _, err := io.ReadFull(r, data); err != nil {
+		// Return buffer to pool if it was pooled
+		if pooledBuf != nil {
+			buffer.Put(pooledBuf)
+		}
 		return nil, nil, err
 	}
 
+	// Note: Caller is responsible for returning pooled buffer using buffer.Put()
+	// We attach the pooled buffer to the data slice for later cleanup
+	// This is a bit of a hack, but necessary for buffer pool management
 	return header, data, nil
 }
 

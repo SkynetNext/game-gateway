@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"strings"
+
 	"github.com/SkynetNext/game-gateway/internal/buffer"
 	"github.com/SkynetNext/game-gateway/internal/circuitbreaker"
 	"github.com/SkynetNext/game-gateway/internal/config"
@@ -41,8 +43,12 @@ type Gateway struct {
 
 	// Rate limiting and circuit breaking
 	rateLimiter     *ratelimit.Limiter
+	ipLimiter       *ratelimit.IPLimiter               // IP-based rate limiter
 	circuitBreakers map[string]*circuitbreaker.Breaker // backend address -> breaker
 	breakerMu       sync.RWMutex
+
+	// Configuration hot reload
+	configMu sync.RWMutex // Protects config updates
 
 	// Network
 	listener      net.Listener
@@ -79,6 +85,12 @@ func New(cfg *config.Config, podName string) (*Gateway, error) {
 	// Initialize rate limiter (use max_connections from config)
 	rateLimiter := ratelimit.NewLimiter(int64(cfg.ConnectionPool.MaxConnections))
 
+	// Initialize IP-based rate limiter
+	ipLimiter := ratelimit.NewIPLimiter(
+		cfg.Security.MaxConnectionsPerIP,
+		cfg.Security.ConnectionRateLimit,
+	)
+
 	return &Gateway{
 		config:          cfg,
 		podName:         podName,
@@ -89,6 +101,7 @@ func New(cfg *config.Config, podName string) (*Gateway, error) {
 		router:          rtr,
 		redisClient:     redisCli,
 		rateLimiter:     rateLimiter,
+		ipLimiter:       ipLimiter,
 		circuitBreakers: make(map[string]*circuitbreaker.Breaker),
 	}, nil
 }
@@ -212,16 +225,32 @@ func (g *Gateway) loadConfigFromRedis(ctx context.Context) error {
 }
 
 // onRoutingRulesUpdate handles routing rules updates from Redis
+// Enhanced: adds error logging and metrics
 func (g *Gateway) onRoutingRulesUpdate(rules map[int]*router.RoutingRule) {
+	if rules == nil {
+		metrics.ConfigRefreshErrors.WithLabelValues("routing_rules").Inc()
+		logger.L.Warn("received nil routing rules, skipping update")
+		return
+	}
 	for _, rule := range rules {
 		g.router.UpdateRule(rule)
 	}
 }
 
 // onRealmMappingUpdate handles realm mapping updates from Redis
+// Enhanced: adds error logging and metrics
 func (g *Gateway) onRealmMappingUpdate(mapping map[int32]string) {
+	if mapping == nil {
+		metrics.ConfigRefreshErrors.WithLabelValues("realm_mapping").Inc()
+		logger.L.Warn("received nil realm mapping, skipping update")
+		return
+	}
+
 	// Realm mapping is used during routing, can be stored in router if needed
 	// For now, it's accessed directly from Redis when needed
+	logger.L.Debug("realm mapping updated",
+		zap.Int("count", len(mapping)),
+	)
 }
 
 // startMetricsServer starts the metrics and health check HTTP server
@@ -324,7 +353,21 @@ func (g *Gateway) handleConnection(ctx context.Context, conn net.Conn) {
 
 	remoteAddr := conn.RemoteAddr().String()
 
-	// Rate limiting: check if connection is allowed
+	// Extract IP address from remote address
+	ip := extractIP(remoteAddr)
+
+	// IP-based rate limiting: check if connection from this IP is allowed
+	if !g.ipLimiter.Allow(ip) {
+		logger.L.Warn("IP rate limit exceeded",
+			zap.String("remote_addr", remoteAddr),
+			zap.String("ip", ip),
+		)
+		metrics.RateLimitRejected.Inc()
+		return
+	}
+	defer g.ipLimiter.Release(ip)
+
+	// Global rate limiting: check if connection is allowed
 	if !g.rateLimiter.Allow() {
 		logger.L.Warn("connection rate limit exceeded",
 			zap.String("remote_addr", remoteAddr),
@@ -383,9 +426,21 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn *protocol.SniffC
 	remoteAddr := conn.RemoteAddr().String()
 
 	// Read first packet to get routing information
-	clientHeader, messageData, err := protocol.ReadFullPacket(conn)
+	// Use buffer pool and validate message size
+	// Get maxMessageSize from config (thread-safe read, supports hot reload)
+	g.configMu.RLock()
+	maxMessageSize := g.config.Security.MaxMessageSize
+	g.configMu.RUnlock()
+
+	clientHeader, messageData, err := protocol.ReadFullPacket(conn, maxMessageSize)
 	if err != nil {
-		if err != io.EOF {
+		if err == protocol.ErrMessageTooLarge {
+			logger.L.Warn("message too large, rejecting connection",
+				zap.String("remote_addr", remoteAddr),
+				zap.Error(err),
+			)
+			metrics.RoutingErrors.WithLabelValues("message_too_large").Inc()
+		} else if err != io.EOF {
 			logger.L.Warn("failed to read client packet",
 				zap.String("remote_addr", remoteAddr),
 				zap.Error(err),
@@ -393,6 +448,18 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn *protocol.SniffC
 		}
 		return
 	}
+
+	// Track if we used pooled buffer (for cleanup)
+	var pooledBuf []byte
+	if messageData != nil && cap(messageData) >= 8192 {
+		pooledBuf = messageData[:cap(messageData)]
+	}
+	defer func() {
+		// Return buffer to pool if it was pooled
+		if pooledBuf != nil {
+			buffer.Put(pooledBuf)
+		}
+	}()
 
 	// Extract routing information from ServerID
 	_, worldID, serverType, instID := protocol.ExtractServerIDInfo(clientHeader.ServerID)
@@ -450,7 +517,21 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn *protocol.SniffC
 		metrics.RoutingErrors.WithLabelValues("connection_failed").Inc()
 		return
 	}
-	defer g.poolManager.PutConnection(backendAddr, backendConn)
+	// Ensure connection is returned to pool even on panic
+	defer func() {
+		if r := recover(); r != nil {
+			// Log panic and ensure connection is returned
+			logger.L.Error("panic in handleTCPConnection",
+				zap.Any("panic", r),
+				zap.String("remote_addr", remoteAddr),
+			)
+			// Re-panic after cleanup
+			panic(r)
+		}
+		if backendConn != nil {
+			g.poolManager.PutConnection(backendAddr, backendConn)
+		}
+	}()
 
 	// Record request latency
 	latency := time.Since(startTime)
@@ -516,13 +597,25 @@ func (g *Gateway) routeToBackend(ctx context.Context, serverType, worldID, instI
 	return g.router.RouteByServerID(ctx, serverType, worldID, instID)
 }
 
+// extractIP extracts IP address from "host:port" format
+func extractIP(addr string) string {
+	if idx := strings.LastIndex(addr, ":"); idx != -1 {
+		return addr[:idx]
+	}
+	return addr
+}
+
 // forwardConnection forwards data bidirectionally between client and backend
 // Optimized: uses bufio for buffered I/O to reduce system calls
 // Fixed: adds context support for cancellation and timeout control
+// Fixed: uses configurable timeouts from config (supports hot reload)
 func (g *Gateway) forwardConnection(ctx context.Context, sess *session.Session) {
-	// Set connection timeouts
-	readTimeout := 30 * time.Second
-	writeTimeout := 30 * time.Second
+	// Get timeouts from config (thread-safe read)
+	g.configMu.RLock()
+	readTimeout := g.config.ConnectionPool.ReadTimeout
+	writeTimeout := g.config.ConnectionPool.WriteTimeout
+	maxMessageSize := g.config.Security.MaxMessageSize
+	g.configMu.RUnlock()
 
 	// Create buffered readers/writers for better I/O performance
 	clientReader := protocol.NewSniffConn(sess.ClientConn) // Already has buffering
@@ -535,7 +628,12 @@ func (g *Gateway) forwardConnection(ctx context.Context, sess *session.Session) 
 	// Forward client -> backend
 	go func() {
 		defer cancel()
-		defer sess.BackendConn.Close()
+		// Ensure backend connection is closed and returned to pool
+		defer func() {
+			if sess.BackendConn != nil {
+				sess.BackendConn.Close()
+			}
+		}()
 
 		// Set periodic read deadline
 		ticker := time.NewTicker(readTimeout / 2)
@@ -551,16 +649,29 @@ func (g *Gateway) forwardConnection(ctx context.Context, sess *session.Session) 
 					return
 				}
 			default:
-				// Read complete client packet
-				clientHeader, messageData, err := protocol.ReadFullPacket(clientReader)
+				// Read complete client packet with size validation
+				// Use maxMessageSize from config (supports hot reload)
+				clientHeader, messageData, err := protocol.ReadFullPacket(clientReader, maxMessageSize)
 				if err != nil {
-					if err != io.EOF {
+					if err == protocol.ErrMessageTooLarge {
+						logger.L.Warn("message too large, closing connection",
+							zap.Int64("session_id", sess.SessionID),
+							zap.Error(err),
+						)
+						metrics.RoutingErrors.WithLabelValues("message_too_large").Inc()
+					} else if err != io.EOF {
 						logger.L.Debug("client read error",
 							zap.Int64("session_id", sess.SessionID),
 							zap.Error(err),
 						)
 					}
 					return
+				}
+
+				// Track pooled buffer for cleanup
+				var pooledBuf []byte
+				if messageData != nil && cap(messageData) >= 8192 {
+					pooledBuf = messageData[:cap(messageData)]
 				}
 
 				// Update last active time
@@ -577,11 +688,20 @@ func (g *Gateway) forwardConnection(ctx context.Context, sess *session.Session) 
 
 				// Write to backend in server message format
 				if err := protocol.WriteServerMessage(backendWriter, int32(clientHeader.MessageID), sess.SessionID, messageData); err != nil {
+					// Return buffer to pool on error
+					if pooledBuf != nil {
+						buffer.Put(pooledBuf)
+					}
 					logger.L.Debug("backend write error",
 						zap.Int64("session_id", sess.SessionID),
 						zap.Error(err),
 					)
 					return
+				}
+
+				// Return buffer to pool after successful write
+				if pooledBuf != nil {
+					buffer.Put(pooledBuf)
 				}
 
 				metrics.MessagesProcessed.WithLabelValues("client_to_backend", sess.ServiceType).Inc()

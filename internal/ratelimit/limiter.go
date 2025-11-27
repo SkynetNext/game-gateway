@@ -1,7 +1,6 @@
 package ratelimit
 
 import (
-	"sync"
 	"sync/atomic"
 )
 
@@ -9,7 +8,7 @@ import (
 type Limiter struct {
 	maxConns int64
 	current  int64
-	mu       sync.Mutex
+	// Note: mu removed - using atomic operations for better performance
 }
 
 // NewLimiter creates a new rate limiter
@@ -20,13 +19,19 @@ func NewLimiter(maxConns int64) *Limiter {
 }
 
 // Allow checks if a new connection is allowed
+// Fixed: uses atomic CompareAndSwap for thread-safe increment
 func (l *Limiter) Allow() bool {
-	current := atomic.LoadInt64(&l.current)
-	if current >= l.maxConns {
-		return false
+	for {
+		current := atomic.LoadInt64(&l.current)
+		if current >= l.maxConns {
+			return false
+		}
+		// Atomically increment if current value hasn't changed
+		if atomic.CompareAndSwapInt64(&l.current, current, current+1) {
+			return true
+		}
+		// Retry if CAS failed (another goroutine modified the value)
 	}
-	atomic.AddInt64(&l.current, 1)
-	return true
 }
 
 // Release releases a connection slot

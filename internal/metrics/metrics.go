@@ -64,5 +64,16 @@ var (
 		Name: "game_gateway_messages_processed_total",
 		Help: "Total number of messages processed",
 	}, []string{"direction", "service_type"})
-)
 
+	// Configuration refresh metrics
+	ConfigRefreshErrors = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "game_gateway_config_refresh_errors_total",
+		Help: "Total number of configuration refresh errors",
+	}, []string{"config_type"})
+
+	// Connection pool cleanup metrics
+	PoolCleanupErrors = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "game_gateway_pool_cleanup_errors_total",
+		Help: "Total number of connection pool cleanup errors",
+	})
+)

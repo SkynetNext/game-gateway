@@ -1,0 +1,112 @@
+# Prometheus Alert Rules for Game Gateway
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: game-gateway-alerts
+  namespace: monitoring
+  labels:
+    app: game-gateway
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: game-gateway
+      interval: 30s
+      rules:
+        # High error rate
+        - alert: GameGatewayHighErrorRate
+          expr: |
+            sum(rate(game_gateway_routing_errors_total[5m])) > 10
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Game Gateway high error rate"
+            description: "Game Gateway error rate is {{ $value }} errors/sec (threshold: 10)"
+
+        # Circuit breaker open
+        - alert: GameGatewayCircuitBreakerOpen
+          expr: |
+            game_gateway_circuit_breaker_state == 1
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Game Gateway circuit breaker is open"
+            description: "Circuit breaker for {{ $labels.backend }} is open"
+
+        # High connection count
+        - alert: GameGatewayHighConnectionCount
+          expr: |
+            sum(game_gateway_connections_active) > 5000
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Game Gateway high connection count"
+            description: "Game Gateway has {{ $value }} active connections (threshold: 5000)"
+
+        # Rate limit hits
+        - alert: GameGatewayRateLimitHits
+          expr: |
+            rate(game_gateway_rate_limit_rejected_total[5m]) > 50
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Game Gateway rate limit being hit"
+            description: "Rate limit rejections: {{ $value }} req/sec"
+
+        # High latency
+        - alert: GameGatewayHighLatency
+          expr: |
+            histogram_quantile(0.95, sum(rate(game_gateway_request_latency_seconds_bucket[5m])) by (le)) > 1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Game Gateway high latency"
+            description: "P95 latency is {{ $value }}s (threshold: 1s)"
+
+        # Configuration refresh failures
+        - alert: GameGatewayConfigRefreshFailure
+          expr: |
+            rate(game_gateway_config_refresh_errors_total[5m]) > 0.1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Game Gateway config refresh failures"
+            description: "Config refresh error rate: {{ $value }} errors/sec"
+
+        # Pod down
+        - alert: GameGatewayPodDown
+          expr: |
+            up{job="game-gateway"} == 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Game Gateway pod is down"
+            description: "Game Gateway pod {{ $labels.pod }} is down"
+
+        # High memory usage
+        - alert: GameGatewayHighMemoryUsage
+          expr: |
+            container_memory_usage_bytes{pod=~"game-gateway-.*"} / container_spec_memory_limit_bytes{pod=~"game-gateway-.*"} > 0.9
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Game Gateway high memory usage"
+            description: "Memory usage is {{ $value | humanizePercentage }} (threshold: 90%)"
+
+        # High CPU usage
+        - alert: GameGatewayHighCPUUsage
+          expr: |
+            rate(container_cpu_usage_seconds_total{pod=~"game-gateway-.*"}[5m]) > 1.5
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Game Gateway high CPU usage"
+            description: "CPU usage is {{ $value }} cores (threshold: 1.5)"

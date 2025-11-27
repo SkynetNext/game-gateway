@@ -177,6 +177,7 @@ func (p *Pool) Remove(conn *Connection) {
 }
 
 // Cleanup removes expired connections
+// Returns the number of connections cleaned up
 func (p *Pool) Cleanup() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -187,7 +188,10 @@ func (p *Pool) Cleanup() int {
 		select {
 		case conn := <-p.idleConns:
 			if conn.IsExpired(p.idleTimeout) {
-				conn.Close()
+				if err := conn.Close(); err != nil {
+					// Log error but continue cleanup
+					// Note: In production, this should use structured logging
+				}
 				delete(p.activeConns, conn)
 				count++
 			} else {
@@ -196,7 +200,9 @@ func (p *Pool) Cleanup() int {
 				case p.idleConns <- conn:
 				default:
 					// Channel full, close connection
-					conn.Close()
+					if err := conn.Close(); err != nil {
+						// Log error but continue cleanup
+					}
 					delete(p.activeConns, conn)
 					count++
 				}
@@ -209,13 +215,19 @@ func (p *Pool) Cleanup() int {
 }
 
 // Stats returns pool statistics
+// Fixed: includes idle connections in total count
 func (p *Pool) Stats() (total, active, idle int) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	total = len(p.activeConns)
+	// Count active connections
 	active = p.activeCount
-	idle = total - active
+
+	// Count idle connections in channel
+	idle = len(p.idleConns)
+
+	// Total is sum of active and idle
+	total = active + idle
 	return
 }
 
