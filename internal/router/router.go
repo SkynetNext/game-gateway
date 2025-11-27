@@ -25,6 +25,7 @@ type RoutingRule struct {
 	Strategy    RoutingStrategy `json:"strategy"`
 	Endpoints   []string        `json:"endpoints"`
 	HashKey     string          `json:"hash_key,omitempty"` // Key for consistent hashing (e.g., user_id)
+	WorldID     int             `json:"world_id,omitempty"` // World ID for game service (e.g., 1 for world 1)
 }
 
 // Router manages routing rules and routes requests to backend services
@@ -32,51 +33,78 @@ type Router struct {
 	config *config.RoutingConfig
 
 	mu    sync.RWMutex
-	rules map[int]*RoutingRule // serverType (int) -> rule (primary key lookup)
+	rules map[string]*RoutingRule // key format: "serverType:worldID" (worldID=0 means wildcard)
 
-	// Round-robin counters per service type
-	roundRobinCounters map[int]int
+	// Round-robin counters per service type (key format: "serverType:worldID")
+	roundRobinCounters map[string]int
 }
 
 // NewRouter creates a new router instance
 func NewRouter(cfg *config.RoutingConfig) *Router {
 	return &Router{
 		config:             cfg,
-		rules:              make(map[int]*RoutingRule),
-		roundRobinCounters: make(map[int]int),
+		rules:              make(map[string]*RoutingRule),
+		roundRobinCounters: make(map[string]int),
 	}
 }
 
-// UpdateRule updates routing rule by serverType
+// makeRuleKey creates a key for routing rule: "serverType:worldID"
+// If worldID is 0 or not set, use 0 (wildcard for all worlds)
+func makeRuleKey(serverType, worldID int) string {
+	if worldID <= 0 {
+		return fmt.Sprintf("%d:0", serverType)
+	}
+	return fmt.Sprintf("%d:%d", serverType, worldID)
+}
+
+// UpdateRule updates routing rule by serverType and worldID
+// If worldID is 0 or not set, the rule applies to all worlds (wildcard)
 func (r *Router) UpdateRule(rule *RoutingRule) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.rules[rule.ServerType] = rule
+	key := makeRuleKey(rule.ServerType, rule.WorldID)
+	r.rules[key] = rule
 }
 
-// RemoveRule removes routing rule by serverType (ID)
-func (r *Router) RemoveRule(serverType int) {
+// RemoveRule removes routing rule by serverType and worldID
+// If worldID is 0, removes wildcard rule for the serverType
+func (r *Router) RemoveRule(serverType, worldID int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.rules, serverType)
+	key := makeRuleKey(serverType, worldID)
+	delete(r.rules, key)
 }
 
-// GetRule gets routing rule by serverType (ID)
-func (r *Router) GetRule(serverType int) (*RoutingRule, bool) {
+// GetRule gets routing rule by serverType and worldID
+// If exact match not found, tries to find wildcard rule (worldID=0)
+// Returns the rule and whether it was found
+func (r *Router) GetRule(serverType, worldID int) (*RoutingRule, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	rule, ok := r.rules[serverType]
+
+	// First try exact match
+	if worldID > 0 {
+		key := makeRuleKey(serverType, worldID)
+		if rule, ok := r.rules[key]; ok {
+			return rule, true
+		}
+	}
+
+	// Fallback to wildcard (worldID=0)
+	wildcardKey := makeRuleKey(serverType, 0)
+	rule, ok := r.rules[wildcardKey]
 	return rule, ok
 }
 
 // RouteByServerID routes request to backend service based on serverType, worldID, and instID
-// serverType is the integer ID from packet header (e.g., 10 for account, 20 for version, 30 for game)
-// For account/version services, may only use serverType (instID ignored)
-// For game service, may use serverType + worldID + instID
+// serverType is the integer ID from packet header (e.g., 10 for account, 15 for version, 200 for game)
+// worldID: 0 means wildcard (match all worlds), >0 means specific world
+// For account/version services, worldID is typically 0 (wildcard)
+// For game service, worldID can be specific (e.g., 1 for world 1)
 func (r *Router) RouteByServerID(ctx context.Context, serverType, worldID, instID int) (string, error) {
-	rule, ok := r.GetRule(serverType)
+	rule, ok := r.GetRule(serverType, worldID)
 	if !ok {
-		return "", fmt.Errorf("routing rule not found for serverType: %d", serverType)
+		return "", fmt.Errorf("routing rule not found for serverType: %d, worldID: %d", serverType, worldID)
 	}
 
 	if len(rule.Endpoints) == 0 {
@@ -85,8 +113,8 @@ func (r *Router) RouteByServerID(ctx context.Context, serverType, worldID, instI
 
 	switch rule.Strategy {
 	case StrategyRoundRobin:
-		// For round-robin, ignore instID and just use serverType
-		return r.routeRoundRobin(serverType, rule)
+		// For round-robin, use serverType:worldID as key for counter
+		return r.routeRoundRobin(serverType, worldID, rule)
 	case StrategyConsistentHash:
 		// For consistent hash, can use instID as hash key if needed
 		// For now, use a simple hash based on instID
@@ -95,7 +123,7 @@ func (r *Router) RouteByServerID(ctx context.Context, serverType, worldID, instI
 			index := int(hash) % len(rule.Endpoints)
 			return rule.Endpoints[index], nil
 		}
-		return r.routeRoundRobin(serverType, rule)
+		return r.routeRoundRobin(serverType, worldID, rule)
 	case StrategyRealmBased:
 		// For realm-based (game service), use worldID + instID
 		if worldID > 0 && instID > 0 {
@@ -103,30 +131,32 @@ func (r *Router) RouteByServerID(ctx context.Context, serverType, worldID, instI
 			index := int(hash) % len(rule.Endpoints)
 			return rule.Endpoints[index], nil
 		}
-		return r.routeRoundRobin(serverType, rule)
+		return r.routeRoundRobin(serverType, worldID, rule)
 	default:
 		return "", fmt.Errorf("unknown routing strategy: %s", rule.Strategy)
 	}
 }
 
 // routeRoundRobin routes using round-robin algorithm
-func (r *Router) routeRoundRobin(serverType int, rule *RoutingRule) (string, error) {
+func (r *Router) routeRoundRobin(serverType, worldID int, rule *RoutingRule) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	count := r.roundRobinCounters[serverType]
+	key := makeRuleKey(serverType, worldID)
+	count := r.roundRobinCounters[key]
 	endpoint := rule.Endpoints[count%len(rule.Endpoints)]
-	r.roundRobinCounters[serverType] = (count + 1) % len(rule.Endpoints)
+	r.roundRobinCounters[key] = (count + 1) % len(rule.Endpoints)
 
 	return endpoint, nil
 }
 
-// GetAllRules returns all routing rules by serverType (for monitoring)
-func (r *Router) GetAllRules() map[int]*RoutingRule {
+// GetAllRules returns all routing rules (for monitoring)
+// Returns a map where key is "serverType:worldID" and value is the rule
+func (r *Router) GetAllRules() map[string]*RoutingRule {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	rules := make(map[int]*RoutingRule)
+	rules := make(map[string]*RoutingRule)
 	for k, v := range r.rules {
 		rules[k] = v
 	}

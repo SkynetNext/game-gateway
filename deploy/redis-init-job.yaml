@@ -1,0 +1,102 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: game-gateway-redis-init
+  namespace: hgame
+  labels:
+    app: game-gateway
+    component: redis-init
+spec:
+  ttlSecondsAfterFinished: 300 # Auto-delete after 5 minutes
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: game-gateway
+        component: redis-init
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: redis-init
+          image: redis:7-alpine
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+
+              REDIS_HOST="${REDIS_HOST:-10.1.0.8}"
+              REDIS_PORT="${REDIS_PORT:-6379}"
+              REDIS_PREFIX="${REDIS_PREFIX:-game-gateway:}"
+
+              # Redis CLI command
+              if [ -n "$REDIS_PASSWORD" ]; then
+                REDIS_CLI="redis-cli -h $REDIS_HOST -p $REDIS_PORT -a $REDIS_PASSWORD"
+              else
+                REDIS_CLI="redis-cli -h $REDIS_HOST -p $REDIS_PORT"
+              fi
+
+              echo "==> Initializing Game Gateway Routing Rules"
+              echo "Redis: $REDIS_HOST:$REDIS_PORT"
+              echo "Prefix: $REDIS_PREFIX"
+              echo ""
+
+              # Load routing rules from ConfigMap
+              echo "==> Loading routing rules from ConfigMap..."
+              if [ ! -f /config/routing-rules.json ]; then
+                echo "❌ routing-rules.json not found in ConfigMap"
+                exit 1
+              fi
+
+              # Read JSON from ConfigMap
+              ROUTING_JSON=$(cat /config/routing-rules.json)
+
+              # Validate JSON format
+              echo "$ROUTING_JSON" | grep -q "server_type" || {
+                echo "❌ Invalid JSON format: missing server_type"
+                exit 1
+              }
+
+              # Store routing rules in Redis
+              echo "==> Setting routing rules in Redis..."
+              echo "$ROUTING_JSON" | $REDIS_CLI -x SET "${REDIS_PREFIX}routing:rules"
+
+              # Verify
+              echo ""
+              echo "==> Verifying Configuration..."
+              $REDIS_CLI GET "${REDIS_PREFIX}routing:rules" > /tmp/verify.json
+
+              # Check if stored correctly
+              if [ -s /tmp/verify.json ]; then
+                echo "✅ Routing rules stored successfully"
+                echo "Sample content:"
+                cat /tmp/verify.json | head -c 200
+                echo "..."
+              else
+                echo "❌ Failed to store routing rules"
+                exit 1
+              fi
+
+              echo ""
+              echo "✅ Game Gateway routing rules initialized successfully!"
+          env:
+            - name: REDIS_HOST
+              value: "10.1.0.8" # Will be overridden by sed in Jenkinsfile
+            - name: REDIS_PORT
+              value: "6379" # Will be overridden by sed in Jenkinsfile
+            - name: REDIS_PREFIX
+              value: "game-gateway:"
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: game-gateway-secrets
+                  key: redis-password
+                  optional: true
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: game-gateway-routing-rules
