@@ -91,14 +91,23 @@ kind: Service
 metadata:
   name: game-gateway
   namespace: hgame
+  labels:
+    app: game-gateway
+    app.kubernetes.io/name: game-gateway
+    app.kubernetes.io/component: gateway
 spec:
-  type: ClusterIP
+  type: NodePort
   selector:
     app: game-gateway
   ports:
     - name: business
       port: 8080
       targetPort: 8080
+      nodePort: 30808
+      protocol: TCP
+    - name: health
+      port: 9090
+      targetPort: 9090
       protocol: TCP
 
 ---
