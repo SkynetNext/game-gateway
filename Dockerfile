@@ -1,6 +1,11 @@
 # Build stage
 FROM golang:1.21-alpine AS builder
 
+# Set Go proxy for China network (use goproxy.cn or direct)
+ENV GOPROXY=https://goproxy.cn,direct
+ENV CGO_ENABLED=0
+ENV GOOS=linux
+
 WORKDIR /build
 
 # Copy go mod files
@@ -11,7 +16,7 @@ RUN go mod download
 COPY . .
 
 # Build
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o game-gateway ./cmd/gateway
+RUN go build -a -installsuffix cgo -o game-gateway ./cmd/gateway
 
 # Runtime stage
 FROM alpine:latest
