@@ -20,7 +20,8 @@ const (
 
 // RoutingRule defines routing rule for a service type
 type RoutingRule struct {
-	ServiceType string          `json:"service_type"` // Service type from config (e.g., "account", "version", "game")
+	ServerType  int             `json:"server_type"`  // Primary key, serverType (integer from packet header)
+	ServiceName string          `json:"service_name"` // Service name for display/config (e.g., "account", "version", "game")
 	Strategy    RoutingStrategy `json:"strategy"`
 	Endpoints   []string        `json:"endpoints"`
 	HashKey     string          `json:"hash_key,omitempty"` // Key for consistent hashing (e.g., user_id)
@@ -31,101 +32,101 @@ type Router struct {
 	config *config.RoutingConfig
 
 	mu    sync.RWMutex
-	rules map[string]*RoutingRule // service_type -> rule
+	rules map[int]*RoutingRule // serverType (int) -> rule (primary key lookup)
 
 	// Round-robin counters per service type
-	roundRobinCounters map[string]int
+	roundRobinCounters map[int]int
 }
 
 // NewRouter creates a new router instance
 func NewRouter(cfg *config.RoutingConfig) *Router {
 	return &Router{
 		config:             cfg,
-		rules:              make(map[string]*RoutingRule),
-		roundRobinCounters: make(map[string]int),
+		rules:              make(map[int]*RoutingRule),
+		roundRobinCounters: make(map[int]int),
 	}
 }
 
-// UpdateRule updates routing rule for a service type
+// UpdateRule updates routing rule by serverType
 func (r *Router) UpdateRule(rule *RoutingRule) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.rules[rule.ServiceType] = rule
+	r.rules[rule.ServerType] = rule
 }
 
-// GetRule gets routing rule for a service type
-func (r *Router) GetRule(serviceType string) (*RoutingRule, bool) {
+// RemoveRule removes routing rule by serverType (ID)
+func (r *Router) RemoveRule(serverType int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.rules, serverType)
+}
+
+// GetRule gets routing rule by serverType (ID)
+func (r *Router) GetRule(serverType int) (*RoutingRule, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	rule, ok := r.rules[serviceType]
+	rule, ok := r.rules[serverType]
 	return rule, ok
 }
 
-// Route routes request to backend service based on service type, realm ID, and user ID
-func (r *Router) Route(ctx context.Context, serviceType string, realmID int32, userID int64) (string, error) {
-	rule, ok := r.GetRule(serviceType)
+// RouteByServerID routes request to backend service based on serverType, worldID, and instID
+// serverType is the integer ID from packet header (e.g., 10 for account, 20 for version, 30 for game)
+// For account/version services, may only use serverType (instID ignored)
+// For game service, may use serverType + worldID + instID
+func (r *Router) RouteByServerID(ctx context.Context, serverType, worldID, instID int) (string, error) {
+	rule, ok := r.GetRule(serverType)
 	if !ok {
-		return "", fmt.Errorf("routing rule not found for service type: %s", serviceType)
+		return "", fmt.Errorf("routing rule not found for serverType: %d", serverType)
 	}
 
 	if len(rule.Endpoints) == 0 {
-		return "", fmt.Errorf("no available endpoints for service type: %s", serviceType)
+		return "", fmt.Errorf("no available endpoints for serverType: %d", serverType)
 	}
 
 	switch rule.Strategy {
 	case StrategyRoundRobin:
-		return r.routeRoundRobin(serviceType, rule)
+		// For round-robin, ignore instID and just use serverType
+		return r.routeRoundRobin(serverType, rule)
 	case StrategyConsistentHash:
-		return r.routeConsistentHash(rule, userID)
+		// For consistent hash, can use instID as hash key if needed
+		// For now, use a simple hash based on instID
+		if instID > 0 {
+			hash := crc32.ChecksumIEEE(fmt.Appendf(nil, "%d", instID))
+			index := int(hash) % len(rule.Endpoints)
+			return rule.Endpoints[index], nil
+		}
+		return r.routeRoundRobin(serverType, rule)
 	case StrategyRealmBased:
-		return r.routeRealmBased(rule, realmID)
+		// For realm-based (game service), use worldID + instID
+		if worldID > 0 && instID > 0 {
+			hash := crc32.ChecksumIEEE(fmt.Appendf(nil, "world:%d:inst:%d", worldID, instID))
+			index := int(hash) % len(rule.Endpoints)
+			return rule.Endpoints[index], nil
+		}
+		return r.routeRoundRobin(serverType, rule)
 	default:
 		return "", fmt.Errorf("unknown routing strategy: %s", rule.Strategy)
 	}
 }
 
 // routeRoundRobin routes using round-robin algorithm
-func (r *Router) routeRoundRobin(serviceType string, rule *RoutingRule) (string, error) {
+func (r *Router) routeRoundRobin(serverType int, rule *RoutingRule) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	count := r.roundRobinCounters[serviceType]
+	count := r.roundRobinCounters[serverType]
 	endpoint := rule.Endpoints[count%len(rule.Endpoints)]
-	r.roundRobinCounters[serviceType] = (count + 1) % len(rule.Endpoints)
+	r.roundRobinCounters[serverType] = (count + 1) % len(rule.Endpoints)
 
 	return endpoint, nil
 }
 
-// routeConsistentHash routes using consistent hashing based on user ID
-func (r *Router) routeConsistentHash(rule *RoutingRule, userID int64) (string, error) {
-	if len(rule.Endpoints) == 0 {
-		return "", fmt.Errorf("no available endpoints")
-	}
-
-	// Use CRC32 for hashing
-	hash := crc32.ChecksumIEEE([]byte(fmt.Sprintf("%d", userID)))
-	index := int(hash) % len(rule.Endpoints)
-	return rule.Endpoints[index], nil
-}
-
-// routeRealmBased routes based on realm ID
-func (r *Router) routeRealmBased(rule *RoutingRule, realmID int32) (string, error) {
-	if realmID <= 0 {
-		return "", fmt.Errorf("invalid realm ID: %d", realmID)
-	}
-
-	// Select endpoint based on realm_id (can use hash or direct mapping)
-	hash := crc32.ChecksumIEEE([]byte(fmt.Sprintf("realm:%d", realmID)))
-	index := int(hash) % len(rule.Endpoints)
-	return rule.Endpoints[index], nil
-}
-
-// GetAllRules returns all routing rules (for monitoring)
-func (r *Router) GetAllRules() map[string]*RoutingRule {
+// GetAllRules returns all routing rules by serverType (for monitoring)
+func (r *Router) GetAllRules() map[int]*RoutingRule {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	rules := make(map[string]*RoutingRule)
+	rules := make(map[int]*RoutingRule)
 	for k, v := range r.rules {
 		rules[k] = v
 	}

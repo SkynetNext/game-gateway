@@ -11,9 +11,6 @@ type Session struct {
 	// SessionID is a long integer (not string)
 	SessionID int64
 
-	// GatewayID is the Pod name in K8s environment
-	GatewayID string
-
 	// ClientConn is the connection to client
 	ClientConn net.Conn
 
@@ -28,6 +25,12 @@ type Session struct {
 
 	// ServiceType is the service type from config (e.g., "account", "version", "game")
 	ServiceType string
+
+	// WorldID is the world ID from ServerID
+	WorldID int32
+
+	// InstID is the instance ID from ServerID
+	InstID int32
 
 	// CreatedAt is the session creation time
 	CreatedAt time.Time
@@ -136,4 +139,3 @@ func (m *Manager) GetAll() []*Session {
 	}
 	return sessions
 }
-

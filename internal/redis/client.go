@@ -52,7 +52,8 @@ func (c *Client) key(suffix string) string {
 }
 
 // LoadRoutingRules loads routing rules from Redis
-func (c *Client) LoadRoutingRules(ctx context.Context) (map[string]*router.RoutingRule, error) {
+// Returns a map where key is the serverType (integer ID) and value is the RoutingRule
+func (c *Client) LoadRoutingRules(ctx context.Context) (map[int]*router.RoutingRule, error) {
 	key := c.key("routing:rules")
 	data, err := c.rdb.Get(ctx, key).Result()
 	if err == redis.Nil {
@@ -62,7 +63,7 @@ func (c *Client) LoadRoutingRules(ctx context.Context) (map[string]*router.Routi
 		return nil, fmt.Errorf("failed to load routing rules: %w", err)
 	}
 
-	var rules map[string]*router.RoutingRule
+	var rules map[int]*router.RoutingRule
 	if err := json.Unmarshal([]byte(data), &rules); err != nil {
 		return nil, fmt.Errorf("failed to parse routing rules: %w", err)
 	}
@@ -91,7 +92,7 @@ func (c *Client) LoadRealmMapping(ctx context.Context) (map[int32]string, error)
 }
 
 // WatchRoutingRules watches for routing rules changes via Redis pub/sub
-func (c *Client) WatchRoutingRules(ctx context.Context, callback func(map[string]*router.RoutingRule)) error {
+func (c *Client) WatchRoutingRules(ctx context.Context, callback func(map[int]*router.RoutingRule)) error {
 	key := c.key("routing:rules")
 	pubsub := c.rdb.Subscribe(ctx, key+":notify")
 	defer pubsub.Close()
@@ -135,7 +136,7 @@ func (c *Client) WatchRealmMapping(ctx context.Context, callback func(map[int32]
 }
 
 // RefreshLoop periodically refreshes configuration from Redis
-func (c *Client) RefreshLoop(ctx context.Context, interval time.Duration, onRoutingRules func(map[string]*router.RoutingRule), onRealmMapping func(map[int32]string)) {
+func (c *Client) RefreshLoop(ctx context.Context, interval time.Duration, onRoutingRules func(map[int]*router.RoutingRule), onRealmMapping func(map[int32]string)) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
