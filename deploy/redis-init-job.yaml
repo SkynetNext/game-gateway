@@ -4,7 +4,7 @@ metadata:
   name: game-gateway-redis-init
   namespace: hgame
   labels:
-    app: game-gateway
+    app: game-gateway-redis-init
     component: redis-init
 spec:
   ttlSecondsAfterFinished: 300 # Auto-delete after 5 minutes
@@ -12,7 +12,7 @@ spec:
   template:
     metadata:
       labels:
-        app: game-gateway
+        app: game-gateway-redis-init
         component: redis-init
     spec:
       restartPolicy: Never
