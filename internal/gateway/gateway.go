@@ -538,6 +538,12 @@ func (g *Gateway) handleWebSocketConnection(ctx context.Context, conn *protocol.
 		return
 	}
 
+	logger.InfoWithTrace(ctx, "websocket upgrade received",
+		zap.String("remote_addr", remoteAddr),
+		zap.String("path", req.URL.Path),
+		zap.String("subprotocols", strings.Join(req.Header.Values("Sec-WebSocket-Protocol"), ",")),
+	)
+
 	acceptKey, err := computeWebSocketAcceptKey(req.Header.Get("Sec-WebSocket-Key"))
 	if err != nil {
 		logger.DebugWithTrace(ctx, "failed to compute WebSocket key",
@@ -563,11 +569,20 @@ func (g *Gateway) handleWebSocketConnection(ctx context.Context, conn *protocol.
 		return
 	}
 
+	logger.InfoWithTrace(ctx, "websocket handshake completed",
+		zap.String("remote_addr", remoteAddr),
+		zap.String("subprotocol", subprotocol),
+	)
+
 	g.configMu.RLock()
 	maxMessageSize := g.config.Security.MaxMessageSize
 	g.configMu.RUnlock()
 
 	wsConn := protocol.NewWebSocketConn(conn.Conn, conn.Reader(), maxMessageSize)
+
+	logger.InfoWithTrace(ctx, "websocket connection bridged to tcp handler",
+		zap.String("remote_addr", remoteAddr),
+	)
 	g.handleTCPConnection(ctx, wsConn)
 }
 
