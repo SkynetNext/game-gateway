@@ -1,18 +1,20 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha1"
+	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"strings"
 
 	"github.com/SkynetNext/game-gateway/internal/buffer"
 	"github.com/SkynetNext/game-gateway/internal/circuitbreaker"
@@ -434,21 +436,12 @@ func (g *Gateway) handleConnection(ctx context.Context, conn net.Conn) {
 
 	// Handle based on protocol type
 	switch protoType {
-	case protocol.ProtocolHTTP, protocol.ProtocolWebSocket:
-		logger.DebugWithTrace(ctx, "unsupported protocol",
-			zap.String("remote_addr", remoteAddr),
-			zap.String("protocol", fmt.Sprint(protoType)),
-		)
-		middleware.LogAccess(ctx, &middleware.AccessLogEntry{
-			RemoteAddr: remoteAddr,
-			DurationMs: time.Since(startTime).Milliseconds(),
-			Status:     "rejected",
-			Error:      "unsupported protocol",
-		})
-		// TODO: Handle HTTP/WebSocket (can be forwarded to HttpProxy if needed)
-		return
+	case protocol.ProtocolWebSocket:
+		g.handleWebSocketConnection(ctx, sniffConn, nil)
+	case protocol.ProtocolHTTP:
+		g.handleHTTPConnection(ctx, sniffConn)
 	case protocol.ProtocolTCP:
-		g.handleTCPConnection(ctx, sniffConn, peeked)
+		g.handleTCPConnection(ctx, sniffConn)
 	default:
 		logger.DebugWithTrace(ctx, "unknown protocol",
 			zap.String("remote_addr", remoteAddr),

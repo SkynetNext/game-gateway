@@ -35,9 +35,9 @@ func (s *SniffConn) Sniff() (ProtocolType, []byte, error) {
 		bytes.HasPrefix(peeked, []byte("PUT ")) ||
 		bytes.HasPrefix(peeked, []byte("HEAD")) ||
 		bytes.HasPrefix(peeked, []byte("HTTP")) {
-		// Check if it's WebSocket upgrade
-		more, err := s.br.Peek(512)
-		if err == nil && bytes.Contains(more, []byte("Upgrade: websocket")) {
+		// Peek a bit more to inspect headers (best-effort)
+		more, _ := s.br.Peek(512)
+		if bytes.Contains(bytes.ToLower(more), []byte("upgrade: websocket")) {
 			return ProtocolWebSocket, more, nil
 		}
 		return ProtocolHTTP, more, nil
@@ -45,6 +45,11 @@ func (s *SniffConn) Sniff() (ProtocolType, []byte, error) {
 
 	// Default to TCP (custom game protocol)
 	return ProtocolTCP, peeked, nil
+}
+
+// Reader exposes the underlying buffered reader (used for HTTP/WebSocket parsing).
+func (s *SniffConn) Reader() *bufio.Reader {
+	return s.br
 }
 
 // Read implements io.Reader
