@@ -19,6 +19,7 @@ import (
 	"github.com/SkynetNext/game-gateway/internal/config"
 	"github.com/SkynetNext/game-gateway/internal/logger"
 	"github.com/SkynetNext/game-gateway/internal/metrics"
+	"github.com/SkynetNext/game-gateway/internal/middleware"
 	"github.com/SkynetNext/game-gateway/internal/pool"
 	"github.com/SkynetNext/game-gateway/internal/protocol"
 	"github.com/SkynetNext/game-gateway/internal/ratelimit"
@@ -26,7 +27,9 @@ import (
 	"github.com/SkynetNext/game-gateway/internal/retry"
 	"github.com/SkynetNext/game-gateway/internal/router"
 	"github.com/SkynetNext/game-gateway/internal/session"
+	"github.com/SkynetNext/game-gateway/internal/tracing"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 )
 
@@ -148,6 +151,9 @@ func (g *Gateway) Start(ctx context.Context) error {
 		}
 	}()
 
+	// 5. Initialize access logger with batching
+	middleware.InitAccessLogger(100, 5*time.Second) // Batch 100 logs or flush every 5 seconds
+
 	// 5. Start metrics and health check server
 	if err := g.startMetricsServer(ctx); err != nil {
 		return fmt.Errorf("failed to start metrics server: %w", err)
@@ -204,6 +210,9 @@ func (g *Gateway) Shutdown(ctx context.Context) error {
 		}
 	}
 
+	// 7. Shutdown access logger
+	middleware.ShutdownAccessLogger()
+
 	return nil
 }
 
@@ -229,7 +238,7 @@ func (g *Gateway) loadConfigFromRedis(ctx context.Context) error {
 func (g *Gateway) onRoutingRulesUpdate(rules map[int]*router.RoutingRule) {
 	if rules == nil {
 		metrics.ConfigRefreshErrors.WithLabelValues("routing_rules").Inc()
-		logger.L.Warn("received nil routing rules, skipping update")
+		logger.L.Warn("received nil routing rules, skipping update") // No context available here
 		return
 	}
 	for _, rule := range rules {
@@ -242,13 +251,13 @@ func (g *Gateway) onRoutingRulesUpdate(rules map[int]*router.RoutingRule) {
 func (g *Gateway) onRealmMappingUpdate(mapping map[int32]string) {
 	if mapping == nil {
 		metrics.ConfigRefreshErrors.WithLabelValues("realm_mapping").Inc()
-		logger.L.Warn("received nil realm mapping, skipping update")
+		logger.L.Warn("received nil realm mapping, skipping update") // No context available here
 		return
 	}
 
 	// Realm mapping is used during routing, can be stored in router if needed
 	// For now, it's accessed directly from Redis when needed
-	logger.L.Debug("realm mapping updated",
+	logger.L.Debug("realm mapping updated", // No context available here
 		zap.Int("count", len(mapping)),
 	)
 }
@@ -269,13 +278,13 @@ func (g *Gateway) startMetricsServer(_ context.Context) error {
 	go func() {
 		defer g.wg.Done()
 		if err := g.metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.L.Error("metrics server error",
+			logger.L.Error("metrics server error", // No context available here
 				zap.Error(err),
 			)
 		}
 	}()
 
-	logger.L.Info("metrics server started",
+	logger.L.Info("metrics server started", // No context available here
 		zap.Int("port", g.config.Server.HealthCheckPort),
 	)
 
@@ -352,29 +361,46 @@ func (g *Gateway) handleConnection(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 
 	remoteAddr := conn.RemoteAddr().String()
+	startTime := time.Now()
+
+	// Create span for distributed tracing
+	ctx, span := tracing.StartSpan(ctx, "gateway.handle_connection")
+	defer span.End()
 
 	// Extract IP address from remote address
 	ip := extractIP(remoteAddr)
 
 	// IP-based rate limiting: check if connection from this IP is allowed
 	if !g.ipLimiter.Allow(ip) {
-		logger.L.Warn("IP rate limit exceeded",
+		logger.WarnWithTrace(ctx, "IP rate limit exceeded",
 			zap.String("remote_addr", remoteAddr),
 			zap.String("ip", ip),
 		)
 		metrics.RateLimitRejected.Inc()
+		middleware.LogAccess(ctx, &middleware.AccessLogEntry{
+			RemoteAddr: remoteAddr,
+			DurationMs: time.Since(startTime).Milliseconds(),
+			Status:     "rejected",
+			Error:      "IP rate limit exceeded",
+		})
 		return
 	}
 	defer g.ipLimiter.Release(ip)
 
 	// Global rate limiting: check if connection is allowed
 	if !g.rateLimiter.Allow() {
-		logger.L.Warn("connection rate limit exceeded",
+		logger.WarnWithTrace(ctx, "connection rate limit exceeded",
 			zap.String("remote_addr", remoteAddr),
 			zap.Int64("max_connections", g.rateLimiter.Max()),
 			zap.Int64("current_connections", g.rateLimiter.Current()),
 		)
 		metrics.RateLimitRejected.Inc()
+		middleware.LogAccess(ctx, &middleware.AccessLogEntry{
+			RemoteAddr: remoteAddr,
+			DurationMs: time.Since(startTime).Milliseconds(),
+			Status:     "rejected",
+			Error:      "connection rate limit exceeded",
+		})
 		return
 	}
 	defer g.rateLimiter.Release()
@@ -383,7 +409,7 @@ func (g *Gateway) handleConnection(ctx context.Context, conn net.Conn) {
 	metrics.ActiveConnections.Inc()
 	defer metrics.ActiveConnections.Dec()
 
-	logger.L.Info("new connection",
+	logger.InfoWithTrace(ctx, "new connection",
 		zap.String("remote_addr", remoteAddr),
 	)
 
@@ -393,29 +419,47 @@ func (g *Gateway) handleConnection(ctx context.Context, conn net.Conn) {
 	// Sniff protocol
 	protoType, peeked, err := sniffConn.Sniff()
 	if err != nil {
-		logger.L.Warn("failed to sniff protocol",
+		logger.WarnWithTrace(ctx, "failed to sniff protocol",
 			zap.String("remote_addr", remoteAddr),
 			zap.Error(err),
 		)
+		middleware.LogAccess(ctx, &middleware.AccessLogEntry{
+			RemoteAddr: remoteAddr,
+			DurationMs: time.Since(startTime).Milliseconds(),
+			Status:     "error",
+			Error:      err.Error(),
+		})
 		return
 	}
 
 	// Handle based on protocol type
 	switch protoType {
 	case protocol.ProtocolHTTP, protocol.ProtocolWebSocket:
-		logger.L.Debug("unsupported protocol",
+		logger.DebugWithTrace(ctx, "unsupported protocol",
 			zap.String("remote_addr", remoteAddr),
 			zap.String("protocol", fmt.Sprint(protoType)),
 		)
+		middleware.LogAccess(ctx, &middleware.AccessLogEntry{
+			RemoteAddr: remoteAddr,
+			DurationMs: time.Since(startTime).Milliseconds(),
+			Status:     "rejected",
+			Error:      "unsupported protocol",
+		})
 		// TODO: Handle HTTP/WebSocket (can be forwarded to HttpProxy if needed)
 		return
 	case protocol.ProtocolTCP:
 		g.handleTCPConnection(ctx, sniffConn, peeked)
 	default:
-		logger.L.Debug("unknown protocol",
+		logger.DebugWithTrace(ctx, "unknown protocol",
 			zap.String("remote_addr", remoteAddr),
 			zap.String("protocol", fmt.Sprint(protoType)),
 		)
+		middleware.LogAccess(ctx, &middleware.AccessLogEntry{
+			RemoteAddr: remoteAddr,
+			DurationMs: time.Since(startTime).Milliseconds(),
+			Status:     "rejected",
+			Error:      "unknown protocol",
+		})
 		return
 	}
 }
@@ -424,6 +468,10 @@ func (g *Gateway) handleConnection(ctx context.Context, conn net.Conn) {
 func (g *Gateway) handleTCPConnection(ctx context.Context, conn *protocol.SniffConn, _ []byte) {
 	startTime := time.Now()
 	remoteAddr := conn.RemoteAddr().String()
+
+	// Create span for TCP connection handling
+	ctx, span := tracing.StartSpan(ctx, "gateway.handle_tcp_connection")
+	defer span.End()
 
 	// Read first packet to get routing information
 	// Use buffer pool and validate message size
@@ -435,16 +483,28 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn *protocol.SniffC
 	clientHeader, messageData, err := protocol.ReadFullPacket(conn, maxMessageSize)
 	if err != nil {
 		if err == protocol.ErrMessageTooLarge {
-			logger.L.Warn("message too large, rejecting connection",
+			logger.WarnWithTrace(ctx, "message too large, rejecting connection",
 				zap.String("remote_addr", remoteAddr),
 				zap.Error(err),
 			)
 			metrics.RoutingErrors.WithLabelValues("message_too_large").Inc()
+			middleware.LogAccess(ctx, &middleware.AccessLogEntry{
+				RemoteAddr: remoteAddr,
+				DurationMs: time.Since(startTime).Milliseconds(),
+				Status:     "rejected",
+				Error:      "message too large",
+			})
 		} else if err != io.EOF {
-			logger.L.Warn("failed to read client packet",
+			logger.WarnWithTrace(ctx, "failed to read client packet",
 				zap.String("remote_addr", remoteAddr),
 				zap.Error(err),
 			)
+			middleware.LogAccess(ctx, &middleware.AccessLogEntry{
+				RemoteAddr: remoteAddr,
+				DurationMs: time.Since(startTime).Milliseconds(),
+				Status:     "error",
+				Error:      err.Error(),
+			})
 		}
 		return
 	}
@@ -470,7 +530,7 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn *protocol.SniffC
 	// Route to backend service using serverType + worldID + instID
 	backendAddr, err := g.routeToBackend(ctx, int(serverType), int(worldID), int(instID))
 	if err != nil {
-		logger.L.Error("routing failed",
+		logger.ErrorWithTrace(ctx, "routing failed",
 			zap.String("remote_addr", remoteAddr),
 			zap.Int("server_type", int(serverType)),
 			zap.Int("world_id", int(worldID)),
@@ -478,17 +538,34 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn *protocol.SniffC
 			zap.Error(err),
 		)
 		metrics.RoutingErrors.WithLabelValues("not_found").Inc()
+		middleware.LogAccess(ctx, &middleware.AccessLogEntry{
+			RemoteAddr: remoteAddr,
+			ServerType: int(serverType),
+			WorldID:    int(worldID),
+			DurationMs: time.Since(startTime).Milliseconds(),
+			Status:     "error",
+			Error:      err.Error(),
+		})
 		return
 	}
 
 	// Check circuit breaker
 	breaker := g.getOrCreateBreaker(backendAddr)
 	if !breaker.Allow() {
-		logger.L.Warn("circuit breaker is open",
+		logger.WarnWithTrace(ctx, "circuit breaker is open",
 			zap.String("remote_addr", remoteAddr),
 			zap.String("backend_addr", backendAddr),
 		)
 		metrics.RoutingErrors.WithLabelValues("circuit_breaker_open").Inc()
+		middleware.LogAccess(ctx, &middleware.AccessLogEntry{
+			RemoteAddr:  remoteAddr,
+			ServerType:  int(serverType),
+			WorldID:     int(worldID),
+			BackendAddr: backendAddr,
+			DurationMs:  time.Since(startTime).Milliseconds(),
+			Status:      "rejected",
+			Error:       "circuit breaker open",
+		})
 		return
 	}
 
@@ -509,19 +586,28 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn *protocol.SniffC
 		return err
 	})
 	if err != nil {
-		logger.L.Error("failed to get backend connection after retries",
+		logger.ErrorWithTrace(ctx, "failed to get backend connection after retries",
 			zap.String("remote_addr", remoteAddr),
 			zap.String("backend_addr", backendAddr),
 			zap.Error(err),
 		)
 		metrics.RoutingErrors.WithLabelValues("connection_failed").Inc()
+		middleware.LogAccess(ctx, &middleware.AccessLogEntry{
+			RemoteAddr:  remoteAddr,
+			ServerType:  int(serverType),
+			WorldID:     int(worldID),
+			BackendAddr: backendAddr,
+			DurationMs:  time.Since(startTime).Milliseconds(),
+			Status:      "error",
+			Error:       err.Error(),
+		})
 		return
 	}
 	// Ensure connection is returned to pool even on panic
 	defer func() {
 		if r := recover(); r != nil {
 			// Log panic and ensure connection is returned
-			logger.L.Error("panic in handleTCPConnection",
+			logger.ErrorWithTrace(ctx, "panic in handleTCPConnection",
 				zap.Any("panic", r),
 				zap.String("remote_addr", remoteAddr),
 			)
@@ -537,7 +623,7 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn *protocol.SniffC
 	latency := time.Since(startTime)
 	metrics.RequestLatency.WithLabelValues(fmt.Sprintf("%d", serverType)).Observe(latency.Seconds())
 
-	logger.L.Info("session established",
+	logger.InfoWithTrace(ctx, "session established",
 		zap.Int64("session_id", sessionID),
 		zap.String("remote_addr", remoteAddr),
 		zap.String("backend_addr", backendAddr),
@@ -546,15 +632,36 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn *protocol.SniffC
 		zap.Duration("latency", latency),
 	)
 
+	// Extract Trace ID and Span ID from context for propagation to backend
+	// Only propagate if enabled in config (for compatibility with existing cluster)
+	var traceContext map[string]string
+	g.configMu.RLock()
+	enableTracePropagation := g.config.Tracing.EnableTracePropagation
+	g.configMu.RUnlock()
+
+	if enableTracePropagation {
+		traceContext = extractTraceContext(ctx)
+	}
+
 	// Send first message to backend
 	// Note: gateway_id is not needed since sessionID is globally unique
 	// Backend can identify Gateway through connection source if needed
-	if err := protocol.WriteServerMessage(backendConn.Conn(), int32(clientHeader.MessageID), sessionID, messageData); err != nil {
-		logger.L.Error("failed to send initial message to backend",
+	if err := protocol.WriteServerMessage(backendConn.Conn(), int32(clientHeader.MessageID), sessionID, messageData, traceContext); err != nil {
+		logger.ErrorWithTrace(ctx, "failed to send initial message to backend",
 			zap.Int64("session_id", sessionID),
 			zap.String("backend_addr", backendAddr),
 			zap.Error(err),
 		)
+		middleware.LogAccess(ctx, &middleware.AccessLogEntry{
+			RemoteAddr:  remoteAddr,
+			SessionID:   sessionID,
+			ServerType:  int(serverType),
+			WorldID:     int(worldID),
+			BackendAddr: backendAddr,
+			DurationMs:  time.Since(startTime).Milliseconds(),
+			Status:      "error",
+			Error:       err.Error(),
+		})
 		return
 	}
 
@@ -575,14 +682,37 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn *protocol.SniffC
 
 	g.sessionManager.Add(sess)
 	metrics.ActiveSessions.Inc()
+
+	// Log successful session establishment
+	middleware.LogAccess(ctx, &middleware.AccessLogEntry{
+		RemoteAddr:  remoteAddr,
+		SessionID:   sessionID,
+		ServerType:  int(serverType),
+		WorldID:     int(worldID),
+		BackendAddr: backendAddr,
+		DurationMs:  time.Since(startTime).Milliseconds(),
+		Status:      "success",
+	})
+
 	defer func() {
 		g.sessionManager.Remove(sessionID)
 		metrics.ActiveSessions.Dec()
-		logger.L.Info("session closed",
+		duration := time.Since(startTime)
+		logger.InfoWithTrace(ctx, "session closed",
 			zap.Int64("session_id", sessionID),
 			zap.String("remote_addr", remoteAddr),
-			zap.Duration("duration", time.Since(startTime)),
+			zap.Duration("duration", duration),
 		)
+		// Log session closure
+		middleware.LogAccess(ctx, &middleware.AccessLogEntry{
+			RemoteAddr:  remoteAddr,
+			SessionID:   sessionID,
+			ServerType:  int(serverType),
+			WorldID:     int(worldID),
+			BackendAddr: backendAddr,
+			DurationMs:  duration.Milliseconds(),
+			Status:      "closed",
+		})
 	}()
 
 	// Forward subsequent data bidirectionally
@@ -603,6 +733,32 @@ func extractIP(addr string) string {
 		return addr[:idx]
 	}
 	return addr
+}
+
+// extractTraceContext extracts Trace ID and Span ID from context for propagation to backend
+// Optimized: early return when no trace context to avoid allocation
+func extractTraceContext(ctx context.Context) map[string]string {
+	span := trace.SpanFromContext(ctx)
+	if !span.SpanContext().IsValid() {
+		return nil // Return nil to avoid allocation when no trace context
+	}
+
+	traceID := span.SpanContext().TraceID()
+	spanID := span.SpanContext().SpanID()
+
+	// Check if trace ID is valid (not all zeros)
+	// TraceID.IsValid() returns true if trace ID is not all zeros
+	if traceID.IsValid() {
+		traceContext := make(map[string]string, 2)
+		// Convert to hex string (required for protocol)
+		traceContext["trace_id"] = traceID.String()
+		if spanID.IsValid() {
+			traceContext["span_id"] = spanID.String()
+		}
+		return traceContext
+	}
+
+	return nil
 }
 
 // forwardConnection forwards data bidirectionally between client and backend
@@ -654,13 +810,13 @@ func (g *Gateway) forwardConnection(ctx context.Context, sess *session.Session) 
 				clientHeader, messageData, err := protocol.ReadFullPacket(clientReader, maxMessageSize)
 				if err != nil {
 					if err == protocol.ErrMessageTooLarge {
-						logger.L.Warn("message too large, closing connection",
+						logger.WarnWithTrace(ctx, "message too large, closing connection",
 							zap.Int64("session_id", sess.SessionID),
 							zap.Error(err),
 						)
 						metrics.RoutingErrors.WithLabelValues("message_too_large").Inc()
 					} else if err != io.EOF {
-						logger.L.Debug("client read error",
+						logger.DebugWithTrace(ctx, "client read error",
 							zap.Int64("session_id", sess.SessionID),
 							zap.Error(err),
 						)
@@ -679,20 +835,31 @@ func (g *Gateway) forwardConnection(ctx context.Context, sess *session.Session) 
 
 				// Set write deadline before writing
 				if err := backendWriter.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
-					logger.L.Debug("failed to set write deadline",
+					logger.DebugWithTrace(ctx, "failed to set write deadline",
 						zap.Int64("session_id", sess.SessionID),
 						zap.Error(err),
 					)
 					return
 				}
 
+				// Extract Trace ID and Span ID from context for propagation to backend
+				// Only propagate if enabled in config (for compatibility with existing cluster)
+				var traceContext map[string]string
+				g.configMu.RLock()
+				enableTracePropagation := g.config.Tracing.EnableTracePropagation
+				g.configMu.RUnlock()
+
+				if enableTracePropagation {
+					traceContext = extractTraceContext(ctx)
+				}
+
 				// Write to backend in server message format
-				if err := protocol.WriteServerMessage(backendWriter, int32(clientHeader.MessageID), sess.SessionID, messageData); err != nil {
+				if err := protocol.WriteServerMessage(backendWriter, int32(clientHeader.MessageID), sess.SessionID, messageData, traceContext); err != nil {
 					// Return buffer to pool on error
 					if pooledBuf != nil {
 						buffer.Put(pooledBuf)
 					}
-					logger.L.Debug("backend write error",
+					logger.DebugWithTrace(ctx, "backend write error",
 						zap.Int64("session_id", sess.SessionID),
 						zap.Error(err),
 					)
@@ -715,7 +882,7 @@ func (g *Gateway) forwardConnection(ctx context.Context, sess *session.Session) 
 
 	// Set initial read deadline
 	if err := sess.BackendConn.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
-		logger.L.Debug("failed to set initial read deadline",
+		logger.DebugWithTrace(ctx, "failed to set initial read deadline",
 			zap.Int64("session_id", sess.SessionID),
 			zap.Error(err),
 		)
@@ -736,7 +903,7 @@ func (g *Gateway) forwardConnection(ctx context.Context, sess *session.Session) 
 			serverHeader, err := protocol.ReadServerMessageHeader(sess.BackendConn)
 			if err != nil {
 				if err != io.EOF {
-					logger.L.Debug("backend read error",
+					logger.DebugWithTrace(ctx, "backend read error",
 						zap.Int64("session_id", sess.SessionID),
 						zap.Error(err),
 					)
@@ -744,23 +911,28 @@ func (g *Gateway) forwardConnection(ctx context.Context, sess *session.Session) 
 				return
 			}
 
-			// Read Gate message header (9 bytes) - optimized: single ReadFull call
-			gateHeader, err := protocol.ReadGateMsgHeader(sess.BackendConn)
-			if err != nil {
-				if err != io.EOF {
-					logger.L.Debug("gate header read error",
+			// Read Gate message header - always use original format (9 bytes) for compatibility
+			// Backend services (cluster) always send original format, never extended format
+			// Even if Gateway sends extended format to backend, backend will only read first 9 bytes
+			// and will reply with original format (9 bytes)
+			gateHeader, gateErr := protocol.ReadGateMsgHeader(sess.BackendConn)
+			if gateErr != nil {
+				if gateErr != io.EOF {
+					logger.DebugWithTrace(ctx, "gate header read error",
 						zap.Int64("session_id", sess.SessionID),
-						zap.Error(err),
+						zap.Error(gateErr),
 					)
 				}
 				return
 			}
 			_ = gateHeader.OpCode // OpCode (currently not used, but read for protocol correctness)
 
-			// Calculate message data length: totalLength - GateMsgHeaderSize
-			messageDataLen := int(serverHeader.Length) - protocol.GateMsgHeaderSize
+			// Calculate message data length: totalLength - GateMsgHeaderSize (9 bytes)
+			// Backend always uses original format, so always subtract 9 bytes
+			expectedDataLen := int(serverHeader.Length) - protocol.GateMsgHeaderSize
+			messageDataLen := expectedDataLen
 			if messageDataLen < 0 {
-				logger.L.Warn("invalid message length",
+				logger.WarnWithTrace(ctx, "invalid message length",
 					zap.Int64("session_id", sess.SessionID),
 					zap.Int32("total_length", serverHeader.Length),
 				)
@@ -785,7 +957,7 @@ func (g *Gateway) forwardConnection(ctx context.Context, sess *session.Session) 
 						buffer.Put(pooledBuf)
 					}
 					if err != io.EOF {
-						logger.L.Debug("message data read error",
+						logger.DebugWithTrace(ctx, "message data read error",
 							zap.Int64("session_id", sess.SessionID),
 							zap.Int("data_len", messageDataLen),
 							zap.Error(err),
@@ -815,7 +987,7 @@ func (g *Gateway) forwardConnection(ctx context.Context, sess *session.Session) 
 				if pooledBuf != nil {
 					buffer.Put(pooledBuf)
 				}
-				logger.L.Debug("client write error (length)",
+				logger.DebugWithTrace(ctx, "client write error (length)",
 					zap.Int64("session_id", sess.SessionID),
 					zap.Error(err),
 				)
@@ -825,7 +997,7 @@ func (g *Gateway) forwardConnection(ctx context.Context, sess *session.Session) 
 				if pooledBuf != nil {
 					buffer.Put(pooledBuf)
 				}
-				logger.L.Debug("client write error (message_id)",
+				logger.DebugWithTrace(ctx, "client write error (message_id)",
 					zap.Int64("session_id", sess.SessionID),
 					zap.Error(err),
 				)
@@ -835,7 +1007,7 @@ func (g *Gateway) forwardConnection(ctx context.Context, sess *session.Session) 
 				if pooledBuf != nil {
 					buffer.Put(pooledBuf)
 				}
-				logger.L.Debug("client write error (server_id)",
+				logger.DebugWithTrace(ctx, "client write error (server_id)",
 					zap.Int64("session_id", sess.SessionID),
 					zap.Error(err),
 				)
@@ -846,7 +1018,7 @@ func (g *Gateway) forwardConnection(ctx context.Context, sess *session.Session) 
 					if pooledBuf != nil {
 						buffer.Put(pooledBuf)
 					}
-					logger.L.Debug("client write error (data)",
+					logger.DebugWithTrace(ctx, "client write error (data)",
 						zap.Int64("session_id", sess.SessionID),
 						zap.Error(err),
 					)

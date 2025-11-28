@@ -28,6 +28,9 @@ type Config struct {
 	// Security configuration
 	Security SecurityConfig `yaml:"security"`
 
+	// Tracing configuration
+	Tracing TracingConfig `yaml:"tracing"`
+
 	// Graceful shutdown timeout
 	GracefulShutdownTimeout time.Duration `yaml:"graceful_shutdown_timeout"`
 }
@@ -117,6 +120,15 @@ type SecurityConfig struct {
 
 	// Connection rate limit (connections per second per IP)
 	ConnectionRateLimit int `yaml:"connection_rate_limit"`
+}
+
+// TracingConfig represents tracing configuration
+type TracingConfig struct {
+	// Enable trace ID propagation to backend services
+	// WARNING: This requires backend services to support extended GateMsgHeader format (33 bytes)
+	// If disabled (default), uses original format (9 bytes) for compatibility with existing cluster
+	// Default: false (disabled for compatibility)
+	EnableTracePropagation bool `yaml:"enable_trace_propagation"`
 }
 
 // Load loads configuration from file
@@ -286,4 +298,9 @@ func setDefaults(cfg *Config) {
 	if cfg.Security.ConnectionRateLimit == 0 {
 		cfg.Security.ConnectionRateLimit = 5 // 5 connections per second per IP
 	}
+
+	// Tracing defaults
+	// Default: false (disabled) for compatibility with existing cluster services
+	// Enable only if backend services support extended GateMsgHeader format (33 bytes)
+	// If false, uses original format (9 bytes) which is compatible with existing cluster
 }

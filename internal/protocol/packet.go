@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +19,9 @@ const (
 
 	// GateMsgHeaderSize is the size of Gate message header (9 bytes: OpCode + SessionID)
 	GateMsgHeaderSize = 1 + 8
+
+	// GateMsgHeaderExtendedSize is the extended size with Trace Context (33 bytes: OpCode + SessionID + TraceID + SpanID)
+	GateMsgHeaderExtendedSize = 1 + 8 + 16 + 8
 )
 
 // Client Message Header Structure (from client-side packMessage/unpackMessage):
@@ -119,19 +123,46 @@ func WriteServerMessageHeader(w io.Writer, header *ServerMessageHeader) error {
 	return nil
 }
 
-// GateMsgHeader represents the Gate message header (9 bytes)
+// GateMsgHeader represents the Gate message header
+// Original format (9 bytes): OpCode (1) + SessionID (8)
+// Extended format (33 bytes): OpCode (1) + SessionID (8) + TraceID (16) + SpanID (8)
+// TraceID and SpanID are optional: if TraceID is all zeros, use original format
 type GateMsgHeader struct {
-	OpCode    uint8 // OpCode (GateMsgOpCode.Trans = 1)
-	SessionID int64 // Session ID
+	OpCode    uint8    // OpCode (GateMsgOpCode.Trans = 1)
+	SessionID int64    // Session ID
+	TraceID   [16]byte // Trace ID (16 bytes, W3C TraceID format: 128-bit)
+	SpanID    [8]byte  // Span ID (8 bytes, 64-bit)
 }
 
-// WriteGateMsgHeader writes Gate message header to writer (9 bytes, Little Endian for SessionID)
+// HasTraceContext returns true if TraceID is not all zeros
+func (h *GateMsgHeader) HasTraceContext() bool {
+	for _, b := range h.TraceID {
+		if b != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// WriteGateMsgHeader writes Gate message header to writer
+// If TraceID is not all zeros, writes extended format (33 bytes)
+// Otherwise, writes original format (9 bytes) for backward compatibility
 func WriteGateMsgHeader(w io.Writer, header *GateMsgHeader) error {
 	if _, err := w.Write([]byte{header.OpCode}); err != nil {
 		return err
 	}
 	if err := binary.Write(w, binary.LittleEndian, header.SessionID); err != nil {
 		return err
+	}
+
+	// Write Trace Context if present (extended format)
+	if header.HasTraceContext() {
+		if _, err := w.Write(header.TraceID[:]); err != nil {
+			return err
+		}
+		if _, err := w.Write(header.SpanID[:]); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -190,9 +221,39 @@ func ReadFullPacket(r io.Reader, maxMessageSize int) (*ClientMessageHeader, []by
 
 // WriteServerMessage writes a complete server message (MessageHeader + GateMsgHeader + Message Data)
 // This matches the format used by original GateServer when sending to backend services
-func WriteServerMessage(w io.Writer, messageType int32, sessionID int64, messageData []byte) error {
-	// Calculate total length: GateMsgHeader (9 bytes) + message data
-	totalLength := GateMsgHeaderSize + len(messageData)
+// If traceContext is provided, includes Trace ID and Span ID in extended format
+func WriteServerMessage(w io.Writer, messageType int32, sessionID int64, messageData []byte, traceContext ...map[string]string) error {
+	// Create GateMsgHeader
+	gateHeader := &GateMsgHeader{
+		OpCode:    1, // GateMsgOpCode.Trans
+		SessionID: sessionID,
+	}
+
+	// Extract Trace ID and Span ID from trace context if provided
+	// Optimized: use encoding/hex.Decode for better performance than fmt.Sscanf
+	if len(traceContext) > 0 && traceContext[0] != nil {
+		if traceID, ok := traceContext[0]["trace_id"]; ok && traceID != "" && len(traceID) == 32 {
+			// Convert trace ID string to bytes (W3C format: 32 hex chars = 16 bytes)
+			// Use hex.Decode which is much faster than fmt.Sscanf in a loop
+			if decoded, err := hex.DecodeString(traceID); err == nil && len(decoded) == 16 {
+				copy(gateHeader.TraceID[:], decoded)
+			}
+		}
+		if spanID, ok := traceContext[0]["span_id"]; ok && spanID != "" && len(spanID) == 16 {
+			// Convert span ID string to bytes (16 hex chars = 8 bytes)
+			// Use hex.Decode which is much faster than fmt.Sscanf in a loop
+			if decoded, err := hex.DecodeString(spanID); err == nil && len(decoded) == 8 {
+				copy(gateHeader.SpanID[:], decoded)
+			}
+		}
+	}
+
+	// Calculate total length based on whether we have trace context
+	headerSize := GateMsgHeaderSize
+	if gateHeader.HasTraceContext() {
+		headerSize = GateMsgHeaderExtendedSize
+	}
+	totalLength := headerSize + len(messageData)
 
 	// Write MessageHeader (16 bytes)
 	serverHeader := &ServerMessageHeader{
@@ -205,11 +266,7 @@ func WriteServerMessage(w io.Writer, messageType int32, sessionID int64, message
 		return err
 	}
 
-	// Write GateMsgHeader (9 bytes)
-	gateHeader := &GateMsgHeader{
-		OpCode:    1, // GateMsgOpCode.Trans
-		SessionID: sessionID,
-	}
+	// Write GateMsgHeader (9 or 33 bytes depending on trace context)
 	if err := WriteGateMsgHeader(w, gateHeader); err != nil {
 		return err
 	}

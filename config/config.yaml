@@ -57,5 +57,13 @@ security:
   # 每个 IP 的连接速率限制（每秒连接数）
   connection_rate_limit: 5
 
+# 追踪配置
+tracing:
+  # 是否启用 Trace ID 传播到后端服务
+  # ⚠️ 警告：启用此选项需要后端服务支持扩展的 GateMsgHeader 格式（33 字节）
+  # 如果禁用（默认），使用原始格式（9 字节），与现有 cluster 完全兼容
+  # 默认：false（禁用，保持兼容性）
+  enable_trace_propagation: false
+
 # 优雅关闭超时
 graceful_shutdown_timeout: 30s
