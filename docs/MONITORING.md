@@ -10,23 +10,54 @@ Game Gateway provides comprehensive observability through structured logging, Pr
 
 1. **Structured Logging**: Zap-based JSON logs with Trace ID correlation
 2. **Prometheus Metrics**: Standard Prometheus metrics endpoint
-3. **Distributed Tracing**: OpenTelemetry with Jaeger integration
-4. **Access Logging**: Batched access logs with Trace ID
+3. **Distributed Tracing**: OpenTelemetry with OTLP protocol
+4. **Access Logging**: Structured access logs with Trace ID
 
 ### Architecture
 
 ```
-Game Gateway Pods
-  │
-  ├─► Prometheus (scrapes /metrics)
-  │   └─► Grafana (dashboards)
-  │
-  ├─► Loki (collects logs)
-  │   └─► Grafana (log queries)
-  │
-  └─► Jaeger (traces)
-      └─► Jaeger UI (trace visualization)
+┌─────────────────────────────────────────────────────────────────┐
+│                      game-gateway Pod                            │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │ Zap Logger ──→ stdout (JSON + trace_id + service.instance.id)││
+│  │ OTel SDK ──OTLP──→ OTel Collector:4317                       ││
+│  │ Prometheus Client ←── scrape ── Prometheus                   ││
+│  └─────────────────────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────────────────────┘
+                              │
+         ┌────────────────────┼────────────────────┐
+         ▼                    ▼                    ▼
+┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
+│    Promtail     │  │  OTel Collector │  │   Prometheus    │
+│  (DaemonSet)    │  │                 │  │                 │
+└────────┬────────┘  └────────┬────────┘  └────────┬────────┘
+         │                    │                    │
+         ▼                    ▼                    ▼
+┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
+│      Loki       │  │      Tempo      │  │   Prometheus    │
+│     (Logs)      │  │    (Traces)     │  │    (Metrics)    │
+└────────┬────────┘  └────────┬────────┘  └────────┬────────┘
+         │                    │                    │
+         └────────────────────┼────────────────────┘
+                              ▼
+                      ┌─────────────────┐
+                      │     Grafana     │
+                      │ (Unified View)  │
+                      └─────────────────┘
 ```
+
+### Data Flow
+
+1. **Logs**: Application → stdout (JSON) → Promtail (DaemonSet) → Loki → Grafana
+2. **Traces**: Application → OTLP → OTel Collector → Tempo → Grafana
+3. **Metrics**: Application → Prometheus (scrape) → Grafana
+
+### Correlation
+
+- **Logs ↔ Traces**: Logs contain `trace_id` and `span_id` fields
+- **Traces ↔ Logs**: Grafana Tempo configured with "Trace to Logs" feature
+- **Traces ↔ Metrics**: Tempo configured with "Trace to Metrics" feature
+- **All data**: Unified by `service.name`, `service.namespace`, `service.instance.id`
 
 ## Prometheus Metrics
 
