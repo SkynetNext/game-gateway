@@ -419,7 +419,7 @@ func (g *Gateway) handleConnection(ctx context.Context, conn net.Conn) {
 	sniffConn := protocol.NewSniffConn(conn)
 
 	// Sniff protocol
-	protoType, peeked, err := sniffConn.Sniff()
+	protoType, _, err := sniffConn.Sniff()
 	if err != nil {
 		logger.WarnWithTrace(ctx, "failed to sniff protocol",
 			zap.String("remote_addr", remoteAddr),
@@ -457,8 +457,218 @@ func (g *Gateway) handleConnection(ctx context.Context, conn net.Conn) {
 	}
 }
 
+func (g *Gateway) handleHTTPConnection(ctx context.Context, conn *protocol.SniffConn) {
+	startTime := time.Now()
+	remoteAddr := conn.RemoteAddr().String()
+
+	req, err := http.ReadRequest(conn.Reader())
+	if err != nil {
+		logger.DebugWithTrace(ctx, "failed to parse HTTP request",
+			zap.String("remote_addr", remoteAddr),
+			zap.Error(err),
+		)
+		_ = writeHTTPResponse(conn.Conn, http.StatusBadRequest, "text/plain; charset=utf-8", []byte("Malformed HTTP request\n"), nil)
+		middleware.LogAccess(ctx, &middleware.AccessLogEntry{
+			RemoteAddr: remoteAddr,
+			DurationMs: time.Since(startTime).Milliseconds(),
+			Status:     "rejected",
+			Error:      "malformed http request",
+		})
+		return
+	}
+	defer req.Body.Close()
+
+	if isWebSocketUpgrade(req) {
+		g.handleWebSocketConnection(ctx, conn, req)
+		return
+	}
+
+	body := []byte("Unsupported protocol. Gateway expects WebSocket or TCP payloads.\n")
+	_ = writeHTTPResponse(conn.Conn, http.StatusUpgradeRequired, "text/plain; charset=utf-8", body, map[string]string{
+		"Connection": "close",
+	})
+	middleware.LogAccess(ctx, &middleware.AccessLogEntry{
+		RemoteAddr: remoteAddr,
+		DurationMs: time.Since(startTime).Milliseconds(),
+		Status:     "rejected",
+		Error:      "unsupported protocol (http)",
+	})
+}
+
+func (g *Gateway) handleWebSocketConnection(ctx context.Context, conn *protocol.SniffConn, req *http.Request) {
+	startTime := time.Now()
+	remoteAddr := conn.RemoteAddr().String()
+
+	var err error
+	if req == nil {
+		req, err = http.ReadRequest(conn.Reader())
+		if err != nil {
+			logger.DebugWithTrace(ctx, "failed to parse WebSocket handshake",
+				zap.String("remote_addr", remoteAddr),
+				zap.Error(err),
+			)
+			_ = writeHTTPResponse(conn.Conn, http.StatusBadRequest, "text/plain; charset=utf-8", []byte("Malformed WebSocket handshake\n"), nil)
+			middleware.LogAccess(ctx, &middleware.AccessLogEntry{
+				RemoteAddr: remoteAddr,
+				DurationMs: time.Since(startTime).Milliseconds(),
+				Status:     "rejected",
+				Error:      "malformed websocket handshake",
+			})
+			return
+		}
+	}
+	defer req.Body.Close()
+
+	if !isWebSocketRequest(req) {
+		logger.DebugWithTrace(ctx, "invalid WebSocket upgrade",
+			zap.String("remote_addr", remoteAddr),
+		)
+		_ = writeHTTPResponse(conn.Conn, http.StatusBadRequest, "text/plain; charset=utf-8", []byte("Invalid WebSocket upgrade request\n"), nil)
+		middleware.LogAccess(ctx, &middleware.AccessLogEntry{
+			RemoteAddr: remoteAddr,
+			DurationMs: time.Since(startTime).Milliseconds(),
+			Status:     "rejected",
+			Error:      "invalid websocket upgrade",
+		})
+		return
+	}
+
+	acceptKey, err := computeWebSocketAcceptKey(req.Header.Get("Sec-WebSocket-Key"))
+	if err != nil {
+		logger.DebugWithTrace(ctx, "failed to compute WebSocket key",
+			zap.String("remote_addr", remoteAddr),
+			zap.Error(err),
+		)
+		_ = writeHTTPResponse(conn.Conn, http.StatusBadRequest, "text/plain; charset=utf-8", []byte("Invalid WebSocket key\n"), nil)
+		middleware.LogAccess(ctx, &middleware.AccessLogEntry{
+			RemoteAddr: remoteAddr,
+			DurationMs: time.Since(startTime).Milliseconds(),
+			Status:     "rejected",
+			Error:      "invalid websocket key",
+		})
+		return
+	}
+
+	subprotocol := selectWebSocketSubprotocol(req.Header.Values("Sec-WebSocket-Protocol"))
+	if err := writeWebSocketHandshake(conn.Conn, acceptKey, subprotocol); err != nil {
+		logger.WarnWithTrace(ctx, "failed to write WebSocket handshake response",
+			zap.String("remote_addr", remoteAddr),
+			zap.Error(err),
+		)
+		return
+	}
+
+	g.configMu.RLock()
+	maxMessageSize := g.config.Security.MaxMessageSize
+	g.configMu.RUnlock()
+
+	wsConn := protocol.NewWebSocketConn(conn.Conn, conn.Reader(), maxMessageSize)
+	g.handleTCPConnection(ctx, wsConn)
+}
+
+func isWebSocketUpgrade(req *http.Request) bool {
+	return strings.EqualFold(req.Header.Get("Upgrade"), "websocket")
+}
+
+func isWebSocketRequest(req *http.Request) bool {
+	if req.Method != http.MethodGet {
+		return false
+	}
+	if !strings.EqualFold(req.Header.Get("Upgrade"), "websocket") {
+		return false
+	}
+	if !headerContainsToken(req.Header, "Connection", "Upgrade") {
+		return false
+	}
+	key := strings.TrimSpace(req.Header.Get("Sec-WebSocket-Key"))
+	if key == "" {
+		return false
+	}
+	if version := strings.TrimSpace(req.Header.Get("Sec-WebSocket-Version")); version != "" && version != "13" {
+		return false
+	}
+	return true
+}
+
+const websocketGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+func computeWebSocketAcceptKey(clientKey string) (string, error) {
+	clientKey = strings.TrimSpace(clientKey)
+	if clientKey == "" {
+		return "", fmt.Errorf("empty Sec-WebSocket-Key")
+	}
+	h := sha1.Sum([]byte(clientKey + websocketGUID))
+	return base64.StdEncoding.EncodeToString(h[:]), nil
+}
+
+func writeHTTPResponse(w io.Writer, status int, contentType string, body []byte, extraHeaders map[string]string) error {
+	if body == nil {
+		body = []byte{}
+	}
+	var resp bytes.Buffer
+	text := http.StatusText(status)
+	if text == "" {
+		text = "Status"
+	}
+	fmt.Fprintf(&resp, "HTTP/1.1 %d %s\r\n", status, text)
+	fmt.Fprintf(&resp, "Content-Length: %d\r\n", len(body))
+	if contentType != "" {
+		fmt.Fprintf(&resp, "Content-Type: %s\r\n", contentType)
+	}
+	hasConnectionHeader := false
+	for k, v := range extraHeaders {
+		fmt.Fprintf(&resp, "%s: %s\r\n", k, v)
+		if strings.EqualFold(k, "Connection") {
+			hasConnectionHeader = true
+		}
+	}
+	if !hasConnectionHeader {
+		resp.WriteString("Connection: close\r\n")
+	}
+	resp.WriteString("\r\n")
+	resp.Write(body)
+	_, err := w.Write(resp.Bytes())
+	return err
+}
+
+func writeWebSocketHandshake(w io.Writer, acceptKey, subprotocol string) error {
+	var resp bytes.Buffer
+	resp.WriteString("HTTP/1.1 101 Switching Protocols\r\n")
+	resp.WriteString("Upgrade: websocket\r\n")
+	resp.WriteString("Connection: Upgrade\r\n")
+	fmt.Fprintf(&resp, "Sec-WebSocket-Accept: %s\r\n", acceptKey)
+	if subprotocol != "" {
+		fmt.Fprintf(&resp, "Sec-WebSocket-Protocol: %s\r\n", subprotocol)
+	}
+	resp.WriteString("\r\n")
+	_, err := w.Write(resp.Bytes())
+	return err
+}
+
+func selectWebSocketSubprotocol(values []string) string {
+	for _, raw := range values {
+		for _, token := range strings.Split(raw, ",") {
+			if proto := strings.TrimSpace(token); proto != "" {
+				return proto
+			}
+		}
+	}
+	return ""
+}
+
+func headerContainsToken(h http.Header, key, token string) bool {
+	for _, v := range h.Values(key) {
+		for _, part := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(part), token) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // handleTCPConnection handles TCP connection (game protocol)
-func (g *Gateway) handleTCPConnection(ctx context.Context, conn *protocol.SniffConn, _ []byte) {
+func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn) {
 	startTime := time.Now()
 	remoteAddr := conn.RemoteAddr().String()
 
