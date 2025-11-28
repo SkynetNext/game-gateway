@@ -434,6 +434,11 @@ func (g *Gateway) handleConnection(ctx context.Context, conn net.Conn) {
 		return
 	}
 
+	logger.InfoWithTrace(ctx, "protocol peeked",
+		zap.String("remote_addr", remoteAddr),
+		zap.String("peeked_hex", fmt.Sprintf("%x", peeked)),
+	)
+
 	// Handle based on protocol type
 	switch protoType {
 	case protocol.ProtocolWebSocket:
@@ -443,10 +448,6 @@ func (g *Gateway) handleConnection(ctx context.Context, conn net.Conn) {
 	case protocol.ProtocolTCP:
 		g.handleTCPConnection(ctx, sniffConn)
 	default:
-		logger.InfoWithTrace(ctx, "unknown protocol bytes",
-			zap.String("remote_addr", remoteAddr),
-			zap.String("peeked_hex", fmt.Sprintf("%x", peeked)),
-		)
 		logger.InfoWithTrace(ctx, "unknown protocol",
 			zap.String("remote_addr", remoteAddr),
 			zap.String("protocol", fmt.Sprint(protoType)),
