@@ -22,10 +22,16 @@ message GamePacket {
   // Payload 原始的消息体二进制数据 (透传，不进行二次序列化)
   bytes payload = 3;
   
-  // Metadata 扩展字段，用于传递 TraceContext 等元数据
+  // Metadata 扩展字段，用于传递其他元数据
   map<string, string> metadata = 4;
 
   // 用于广播，如果此字段有值，则忽略 session_id，消息会广播给列表中的所有 session
   repeated int64 target_session_ids = 5;
+
+  // Trace ID (OpenTelemetry 分布式追踪，32字符十六进制字符串)
+  string trace_id = 6;
+
+  // Span ID (OpenTelemetry 分布式追踪，16字符十六进制字符串)
+  string span_id = 7;
 }
 

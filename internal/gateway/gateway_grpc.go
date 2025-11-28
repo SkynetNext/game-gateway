@@ -7,6 +7,7 @@ import (
 	gateway "github.com/SkynetNext/game-gateway/api"
 	"github.com/SkynetNext/game-gateway/internal/logger"
 	"github.com/SkynetNext/game-gateway/internal/protocol"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 )
 
@@ -70,6 +71,12 @@ func (g *Gateway) forwardGrpcConnection(ctx context.Context, sessID int64, clien
 			SessionId: sessID,
 			MsgId:     int32(header.MessageID),
 			Payload:   data,
+		}
+
+		// Extract trace context from ctx and add to packet
+		if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
+			packet.TraceId = span.SpanContext().TraceID().String()
+			packet.SpanId = span.SpanContext().SpanID().String()
 		}
 
 		err = g.grpcManager.Send(ctx, backendAddr, packet)

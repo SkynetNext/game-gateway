@@ -30,12 +30,16 @@ type GamePacket struct {
 	MsgId int32 `protobuf:"varint,2,opt,name=msg_id,json=msgId,proto3" json:"msg_id,omitempty"`
 	// Payload 原始的消息体二进制数据 (透传，不进行二次序列化)
 	Payload []byte `protobuf:"bytes,3,opt,name=payload,proto3" json:"payload,omitempty"`
-	// Metadata 扩展字段，用于传递 TraceContext 等元数据
+	// Metadata 扩展字段，用于传递其他元数据
 	Metadata map[string]string `protobuf:"bytes,4,rep,name=metadata,proto3" json:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	// 用于广播，如果此字段有值，则忽略 session_id，消息会广播给列表中的所有 session
 	TargetSessionIds []int64 `protobuf:"varint,5,rep,packed,name=target_session_ids,json=targetSessionIds,proto3" json:"target_session_ids,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Trace ID (OpenTelemetry 分布式追踪，32字符十六进制字符串)
+	TraceId string `protobuf:"bytes,6,opt,name=trace_id,json=traceId,proto3" json:"trace_id,omitempty"`
+	// Span ID (OpenTelemetry 分布式追踪，16字符十六进制字符串)
+	SpanId        string `protobuf:"bytes,7,opt,name=span_id,json=spanId,proto3" json:"span_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *GamePacket) Reset() {
@@ -103,11 +107,25 @@ func (x *GamePacket) GetTargetSessionIds() []int64 {
 	return nil
 }
 
+func (x *GamePacket) GetTraceId() string {
+	if x != nil {
+		return x.TraceId
+	}
+	return ""
+}
+
+func (x *GamePacket) GetSpanId() string {
+	if x != nil {
+		return x.SpanId
+	}
+	return ""
+}
+
 var File_gateway_proto protoreflect.FileDescriptor
 
 const file_gateway_proto_rawDesc = "" +
 	"\n" +
-	"\rgateway.proto\x12\agateway\"\x86\x02\n" +
+	"\rgateway.proto\x12\agateway\"\xba\x02\n" +
 	"\n" +
 	"GamePacket\x12\x1d\n" +
 	"\n" +
@@ -115,7 +133,9 @@ const file_gateway_proto_rawDesc = "" +
 	"\x06msg_id\x18\x02 \x01(\x05R\x05msgId\x12\x18\n" +
 	"\apayload\x18\x03 \x01(\fR\apayload\x12=\n" +
 	"\bmetadata\x18\x04 \x03(\v2!.gateway.GamePacket.MetadataEntryR\bmetadata\x12,\n" +
-	"\x12target_session_ids\x18\x05 \x03(\x03R\x10targetSessionIds\x1a;\n" +
+	"\x12target_session_ids\x18\x05 \x03(\x03R\x10targetSessionIds\x12\x19\n" +
+	"\btrace_id\x18\x06 \x01(\tR\atraceId\x12\x17\n" +
+	"\aspan_id\x18\a \x01(\tR\x06spanId\x1a;\n" +
 	"\rMetadataEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x012S\n" +

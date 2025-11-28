@@ -757,6 +757,11 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 			MsgId:     int32(clientHeader.MessageID),
 			Payload:   messageData,
 		}
+		// Add trace context to gRPC packet
+		if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
+			packet.TraceId = span.SpanContext().TraceID().String()
+			packet.SpanId = span.SpanContext().SpanID().String()
+		}
 		if err := g.grpcManager.Send(ctx, backendAddr, packet); err != nil {
 			middleware.LogBackendError(ctx, sessionID, remoteAddr, backendAddr, int(serverType), int(worldID), err, time.Since(startTime).Nanoseconds())
 			return
