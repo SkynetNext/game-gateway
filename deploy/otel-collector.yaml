@@ -27,6 +27,8 @@ data:
     receivers:
       otlp:
         protocols:
+          # Use 0.0.0.0 for receivers (needed for Service to receive traffic)
+          # In K8s, this is safe as Service only exposes ClusterIP
           grpc:
             endpoint: 0.0.0.0:4317
           http:
@@ -62,9 +64,12 @@ data:
 
     extensions:
       health_check:
+        # Must use 0.0.0.0 for health check (kubelet needs to access from outside pod)
+        # This is safe in K8s as Service only exposes ClusterIP, not external IPs
         endpoint: 0.0.0.0:13133
       zpages:
-        endpoint: 0.0.0.0:55679
+        # zpages is debug interface, use 127.0.0.1 (only accessible via port-forward)
+        endpoint: 127.0.0.1:55679
 
     service:
       extensions: [health_check, zpages]
@@ -97,6 +102,9 @@ spec:
           image: otel/opentelemetry-collector-contrib:0.96.0
           args:
             - --config=/etc/otel-collector/otel-collector-config.yaml
+            # Enable feature gate to use localhost as default for extensions
+            # This removes the warning about 0.0.0.0 exposing to all interfaces
+            - --feature-gates=component.UseLocalHostAsDefaultHost
           ports:
             - name: otlp-grpc
               containerPort: 4317
