@@ -574,6 +574,9 @@ func (g *Gateway) handleWebSocketConnection(ctx context.Context, conn *protocol.
 		zap.String("subprotocol", subprotocol),
 	)
 
+	// Clear read deadline after handshake - WebSocket connections should wait for frames without timeout
+	_ = conn.Conn.SetReadDeadline(time.Time{})
+
 	g.configMu.RLock()
 	maxMessageSize := g.config.Security.MaxMessageSize
 	g.configMu.RUnlock()
