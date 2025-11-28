@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	gateway "github.com/SkynetNext/game-gateway/api"
 	"github.com/SkynetNext/game-gateway/internal/buffer"
 	"github.com/SkynetNext/game-gateway/internal/circuitbreaker"
 	"github.com/SkynetNext/game-gateway/internal/config"
@@ -30,6 +31,7 @@ import (
 	"github.com/SkynetNext/game-gateway/internal/router"
 	"github.com/SkynetNext/game-gateway/internal/session"
 	"github.com/SkynetNext/game-gateway/internal/tracing"
+	grpcmgr "github.com/SkynetNext/game-gateway/internal/transport/grpc"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
@@ -43,6 +45,7 @@ type Gateway struct {
 	// Components
 	sessionManager *session.Manager
 	poolManager    *pool.Manager
+	grpcManager    *grpcmgr.Manager
 	router         *router.Router
 	redisClient    *redis.Client
 
@@ -96,7 +99,7 @@ func New(cfg *config.Config, podName string) (*Gateway, error) {
 		cfg.Security.ConnectionRateLimit,
 	)
 
-	return &Gateway{
+	g := &Gateway{
 		config:          cfg,
 		podName:         podName,
 		startTime:       time.Now().Unix(),
@@ -108,7 +111,14 @@ func New(cfg *config.Config, podName string) (*Gateway, error) {
 		rateLimiter:     rateLimiter,
 		ipLimiter:       ipLimiter,
 		circuitBreakers: make(map[string]*circuitbreaker.Breaker),
-	}, nil
+	}
+
+	if cfg.Server.UseGrpc {
+		g.grpcManager = grpcmgr.NewManager(cfg.Server.GatewayAppID, g.handleGrpcPacket)
+		logger.Info("gRPC transport enabled", zap.Uint32("app_id", cfg.Server.GatewayAppID))
+	}
+
+	return g, nil
 }
 
 // Start starts the gateway service
@@ -687,27 +697,29 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 		return
 	}
 
-	// Get connection from pool with retry
+	// Get connection from pool with retry (only for TCP mode)
 	var backendConn *pool.Connection
-	retryCfg := retry.RetryConfig{
-		MaxRetries: g.config.ConnectionPool.MaxRetries,
-		RetryDelay: g.config.ConnectionPool.RetryDelay,
-	}
-	err = retry.Do(ctx, retryCfg, func() error {
-		var err error
-		backendConn, err = g.poolManager.GetConnection(ctx, backendAddr)
-		if err == nil {
-			breaker.RecordSuccess()
-		} else {
-			breaker.RecordFailure()
+
+	if !g.config.Server.UseGrpc {
+		retryCfg := retry.RetryConfig{
+			MaxRetries: g.config.ConnectionPool.MaxRetries,
+			RetryDelay: g.config.ConnectionPool.RetryDelay,
 		}
-		return err
-	})
-	if err != nil {
-		metrics.RoutingErrors.WithLabelValues("connection_failed").Inc()
-		// SINGLE log entry for backend connection error
-		middleware.LogBackendError(ctx, sessionID, remoteAddr, backendAddr, int(serverType), int(worldID), err, time.Since(startTime).Nanoseconds())
-		return
+		err = retry.Do(ctx, retryCfg, func() error {
+			var err error
+			backendConn, err = g.poolManager.GetConnection(ctx, backendAddr)
+			if err == nil {
+				breaker.RecordSuccess()
+			} else {
+				breaker.RecordFailure()
+			}
+			return err
+		})
+		if err != nil {
+			metrics.RoutingErrors.WithLabelValues("connection_failed").Inc()
+			middleware.LogBackendError(ctx, sessionID, remoteAddr, backendAddr, int(serverType), int(worldID), err, time.Since(startTime).Nanoseconds())
+			return
+		}
 	}
 
 	// Ensure connection is returned to pool even on panic
@@ -739,9 +751,21 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 	}
 
 	// Send first message to backend
-	if err := protocol.WriteServerMessage(backendConn.Conn(), int32(clientHeader.MessageID), sessionID, messageData, traceContext); err != nil {
-		middleware.LogBackendError(ctx, sessionID, remoteAddr, backendAddr, int(serverType), int(worldID), err, time.Since(startTime).Nanoseconds())
-		return
+	if g.config.Server.UseGrpc {
+		packet := &gateway.GamePacket{
+			SessionId: sessionID,
+			MsgId:     int32(clientHeader.MessageID),
+			Payload:   messageData,
+		}
+		if err := g.grpcManager.Send(ctx, backendAddr, packet); err != nil {
+			middleware.LogBackendError(ctx, sessionID, remoteAddr, backendAddr, int(serverType), int(worldID), err, time.Since(startTime).Nanoseconds())
+			return
+		}
+	} else {
+		if err := protocol.WriteServerMessage(backendConn.Conn(), int32(clientHeader.MessageID), sessionID, messageData, traceContext); err != nil {
+			middleware.LogBackendError(ctx, sessionID, remoteAddr, backendAddr, int(serverType), int(worldID), err, time.Since(startTime).Nanoseconds())
+			return
+		}
 	}
 
 	metrics.MessagesProcessed.WithLabelValues("client_to_backend", fmt.Sprintf("%d", serverType)).Inc()
@@ -750,13 +774,15 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 	sess := &session.Session{
 		SessionID:    sessionID,
 		ClientConn:   conn,
-		BackendConn:  backendConn.Conn(),
 		ServiceType:  fmt.Sprintf("%d", serverType),
 		WorldID:      int32(worldID),
 		InstID:       int32(instID),
 		CreatedAt:    time.Now(),
 		LastActiveAt: time.Now(),
 		State:        session.SessionStateConnected,
+	}
+	if backendConn != nil {
+		sess.BackendConn = backendConn.Conn()
 	}
 
 	g.sessionManager.Add(sess)
@@ -776,7 +802,15 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 	}()
 
 	// Forward subsequent data bidirectionally
-	g.forwardConnection(ctx, sess, log, &bytesIn, &bytesOut)
+	if g.config.Server.UseGrpc {
+		sniffConn, ok := conn.(*protocol.SniffConn)
+		if !ok {
+			sniffConn = protocol.NewSniffConn(conn)
+		}
+		g.forwardGrpcConnection(ctx, sessionID, sniffConn, backendAddr, log, &bytesIn, &bytesOut)
+	} else {
+		g.forwardConnection(ctx, sess, log, &bytesIn, &bytesOut)
+	}
 }
 
 // routeToBackend routes request to backend service using serverType + worldID + instID

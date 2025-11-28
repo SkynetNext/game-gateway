@@ -4,6 +4,12 @@ server:
   listen_addr: ":8080"
   health_check_port: 9090
   metrics_port: 9091
+  # Gateway AppID for cluster communication (sent in handshake)
+  # Backend servers use this to identify the gateway
+  # Set to 0 for default gateway, or configure unique ID for each gateway instance
+  gateway_app_id: 0
+  # Use gRPC for backend communication
+  use_grpc: false
 
 redis:
   # Redis 地址：生产环境使用 K8s 集群内 Redis

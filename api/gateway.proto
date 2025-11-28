@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package gateway;
+
+option go_package = "github.com/SkynetNext/game-gateway/api;gateway";
+option csharp_namespace = "Game.Networking.Grpc";
+
+// GameGatewayService 用于 Gateway 和 GameServer 之间的通信
+service GameGatewayService {
+  // StreamPackets 建立一个双向流，用于在 Gateway 和 GameServer 之间转发数据包
+  rpc StreamPackets(stream GamePacket) returns (stream GamePacket);
+}
+
+// GamePacket 是通用的数据包信封
+message GamePacket {
+  // SessionID 玩家的会话ID (在 Gateway 侧唯一标识一个连接)
+  int64 session_id = 1;
+
+  // MsgID 原始的消息ID (对应 Protobuf 消息类型)
+  int32 msg_id = 2;
+
+  // Payload 原始的消息体二进制数据 (透传，不进行二次序列化)
+  bytes payload = 3;
+  
+  // Metadata 扩展字段，用于传递 TraceContext 等元数据
+  map<string, string> metadata = 4;
+
+  // 用于广播，如果此字段有值，则忽略 session_id，消息会广播给列表中的所有 session
+  repeated int64 target_session_ids = 5;
+}
+

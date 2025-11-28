@@ -45,6 +45,14 @@ type ServerConfig struct {
 
 	// Metrics port
 	MetricsPort int `yaml:"metrics_port"`
+
+	// Gateway AppID for cluster communication
+	// This ID is sent in ClusterClientRegister handshake message
+	// Backend servers use this to identify the gateway
+	GatewayAppID uint32 `yaml:"gateway_app_id"`
+
+	// Use gRPC for backend communication
+	UseGrpc bool `yaml:"use_grpc"`
 }
 
 // RedisConfig represents Redis configuration
