@@ -215,25 +215,25 @@ func (cl *ContextLogger) SpanID() string {
 // Debug logs at debug level with severity_number
 func (cl *ContextLogger) Debug(msg string, fields ...zap.Field) {
 	fields = append(fields, zap.Int("severity_number", SeverityDebug))
-	cl.logger.Debug(msg, fields...)
+	cl.logger.WithOptions(zap.AddCallerSkip(1)).Debug(msg, fields...)
 }
 
 // Info logs at info level with severity_number
 func (cl *ContextLogger) Info(msg string, fields ...zap.Field) {
 	fields = append(fields, zap.Int("severity_number", SeverityInfo))
-	cl.logger.Info(msg, fields...)
+	cl.logger.WithOptions(zap.AddCallerSkip(1)).Info(msg, fields...)
 }
 
 // Warn logs at warn level with severity_number
 func (cl *ContextLogger) Warn(msg string, fields ...zap.Field) {
 	fields = append(fields, zap.Int("severity_number", SeverityWarn))
-	cl.logger.Warn(msg, fields...)
+	cl.logger.WithOptions(zap.AddCallerSkip(1)).Warn(msg, fields...)
 }
 
 // Error logs at error level with severity_number
 func (cl *ContextLogger) Error(msg string, fields ...zap.Field) {
 	fields = append(fields, zap.Int("severity_number", SeverityError))
-	cl.logger.Error(msg, fields...)
+	cl.logger.WithOptions(zap.AddCallerSkip(1)).Error(msg, fields...)
 }
 
 // ============================================================================
@@ -246,7 +246,7 @@ func (cl *ContextLogger) Error(msg string, fields ...zap.Field) {
 func Info(msg string, fields ...zap.Field) {
 	if L != nil {
 		fields = append(fields, zap.Int("severity_number", SeverityInfo))
-		L.Info(msg, fields...)
+		L.WithOptions(zap.AddCallerSkip(1)).Info(msg, fields...)
 	}
 }
 
@@ -254,7 +254,7 @@ func Info(msg string, fields ...zap.Field) {
 func Error(msg string, fields ...zap.Field) {
 	if L != nil {
 		fields = append(fields, zap.Int("severity_number", SeverityError))
-		L.Error(msg, fields...)
+		L.WithOptions(zap.AddCallerSkip(1)).Error(msg, fields...)
 	}
 }
 
@@ -262,7 +262,7 @@ func Error(msg string, fields ...zap.Field) {
 func Warn(msg string, fields ...zap.Field) {
 	if L != nil {
 		fields = append(fields, zap.Int("severity_number", SeverityWarn))
-		L.Warn(msg, fields...)
+		L.WithOptions(zap.AddCallerSkip(1)).Warn(msg, fields...)
 	}
 }
 
@@ -270,7 +270,7 @@ func Warn(msg string, fields ...zap.Field) {
 func Debug(msg string, fields ...zap.Field) {
 	if L != nil {
 		fields = append(fields, zap.Int("severity_number", SeverityDebug))
-		L.Debug(msg, fields...)
+		L.WithOptions(zap.AddCallerSkip(1)).Debug(msg, fields...)
 	}
 }
 
@@ -328,8 +328,10 @@ func Event(ctx context.Context, eventType EventType, fields ...zap.Field) {
 	fields = append(fields,
 		zap.String("event.type", string(eventType)),
 		zap.Int64("event.timestamp", time.Now().UnixNano()),
+		zap.Int("severity_number", SeverityInfo),
 	)
-	cl.Info(string(eventType), fields...)
+	// Skip 2 levels: Event() -> ContextLogger.logger.Info()
+	cl.logger.WithOptions(zap.AddCallerSkip(2)).Info(string(eventType), fields...)
 }
 
 // EventError logs a structured error event
@@ -339,6 +341,8 @@ func EventError(ctx context.Context, eventType EventType, err error, fields ...z
 		zap.String("event.type", string(eventType)),
 		zap.Int64("event.timestamp", time.Now().UnixNano()),
 		zap.Error(err),
+		zap.Int("severity_number", SeverityError),
 	)
-	cl.Error(string(eventType), fields...)
+	// Skip 2 levels: EventError() -> ContextLogger.logger.Error()
+	cl.logger.WithOptions(zap.AddCallerSkip(2)).Error(string(eventType), fields...)
 }
