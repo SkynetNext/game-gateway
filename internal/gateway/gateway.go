@@ -156,12 +156,12 @@ func (g *Gateway) Start(ctx context.Context) error {
 	// 5. Initialize access logger with batching
 	middleware.InitAccessLogger(100, 5*time.Second) // Batch 100 logs or flush every 5 seconds
 
-	// 5. Start metrics and health check server
+	// 6. Start metrics and health check server
 	if err := g.startMetricsServer(ctx); err != nil {
 		return fmt.Errorf("failed to start metrics server: %w", err)
 	}
 
-	// 6. Start business listener
+	// 7. Start business listener
 	if err := g.startListener(ctx); err != nil {
 		return fmt.Errorf("failed to start listener: %w", err)
 	}
@@ -419,7 +419,7 @@ func (g *Gateway) handleConnection(ctx context.Context, conn net.Conn) {
 	sniffConn := protocol.NewSniffConn(conn)
 
 	// Sniff protocol
-	protoType, _, err := sniffConn.Sniff()
+	protoType, peeked, err := sniffConn.Sniff()
 	if err != nil {
 		logger.WarnWithTrace(ctx, "failed to sniff protocol",
 			zap.String("remote_addr", remoteAddr),
@@ -443,7 +443,11 @@ func (g *Gateway) handleConnection(ctx context.Context, conn net.Conn) {
 	case protocol.ProtocolTCP:
 		g.handleTCPConnection(ctx, sniffConn)
 	default:
-		logger.DebugWithTrace(ctx, "unknown protocol",
+		logger.InfoWithTrace(ctx, "unknown protocol bytes",
+			zap.String("remote_addr", remoteAddr),
+			zap.String("peeked_hex", fmt.Sprintf("%x", peeked)),
+		)
+		logger.InfoWithTrace(ctx, "unknown protocol",
 			zap.String("remote_addr", remoteAddr),
 			zap.String("protocol", fmt.Sprint(protoType)),
 		)
