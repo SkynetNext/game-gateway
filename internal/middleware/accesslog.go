@@ -11,60 +11,73 @@ import (
 )
 
 // AccessLogEntry represents a single access log entry
-// This is used for structured logging and can be sent to Kafka/ELK for analysis
+// Follows OpenTelemetry Semantic Conventions for HTTP/RPC
+// https://opentelemetry.io/docs/specs/semconv/
 type AccessLogEntry struct {
-	Timestamp   time.Time `json:"timestamp"`
-	TraceID     string    `json:"trace_id,omitempty"`
-	SpanID      string    `json:"span_id,omitempty"`
-	RemoteAddr  string    `json:"remote_addr"`
-	SessionID   int64     `json:"session_id,omitempty"`
-	ServerType  int       `json:"server_type,omitempty"`
-	WorldID     int       `json:"world_id,omitempty"`
-	BackendAddr string    `json:"backend_addr,omitempty"`
-	DurationMs  int64     `json:"duration_ms"`
-	Status      string    `json:"status"` // success, error, timeout, rejected
-	BytesIn     int64     `json:"bytes_in,omitempty"`
-	BytesOut    int64     `json:"bytes_out,omitempty"`
-	Error       string    `json:"error,omitempty"`
+	// Timing
+	Timestamp  int64 `json:"timestamp"`   // Unix nanoseconds (OTel standard)
+	DurationNs int64 `json:"duration_ns"` // Duration in nanoseconds
+
+	// Trace Context (OTel standard)
+	TraceID string `json:"trace_id,omitempty"`
+	SpanID  string `json:"span_id,omitempty"`
+
+	// Network attributes (OTel semantic conventions)
+	ClientAddr  string `json:"client.address"` // client.address
+	BackendAddr string `json:"server.address"` // server.address
+
+	// Session attributes
+	SessionID int64 `json:"session.id,omitempty"`
+
+	// Routing attributes
+	ServerType int `json:"server.type,omitempty"`
+	WorldID    int `json:"world.id,omitempty"`
+
+	// Request/Response metrics
+	BytesIn  int64 `json:"network.io.receive,omitempty"` // network.io.receive
+	BytesOut int64 `json:"network.io.send,omitempty"`    // network.io.send
+
+	// Status
+	Status string `json:"status"` // success, error, timeout, rejected, closed
+	Error  string `json:"error.message,omitempty"`
 }
 
-// AccessLogger handles access log recording with batching support
-type AccessLogger struct {
-	logChan       chan *AccessLogEntry
-	batchSize     int
-	flushInterval time.Duration
-	wg            sync.WaitGroup
-	stopChan      chan struct{}
+// accessLogger handles access log recording
+// Simplified: no batching, direct structured logging
+// Reason: Zap is already highly optimized, batching adds complexity
+// For production, logs are collected by Fluent Bit/Vector → Loki
+type accessLogger struct {
+	enabled bool
 }
 
 var (
-	// Global access logger instance
-	globalAccessLogger *AccessLogger
-	once               sync.Once
+	globalAccessLogger *accessLogger
+	accessLoggerOnce   sync.Once
 )
 
 // InitAccessLogger initializes the global access logger
-// batchSize: number of logs to accumulate before flushing
-// flushInterval: maximum time to wait before flushing
-func InitAccessLogger(batchSize int, flushInterval time.Duration) {
-	once.Do(func() {
-		globalAccessLogger = &AccessLogger{
-			logChan:       make(chan *AccessLogEntry, batchSize*2), // Buffer 2x batch size
-			batchSize:     batchSize,
-			flushInterval: flushInterval,
-			stopChan:      make(chan struct{}),
+// Simplified API - just enable/disable
+func InitAccessLogger(enabled bool) {
+	accessLoggerOnce.Do(func() {
+		globalAccessLogger = &accessLogger{
+			enabled: enabled,
 		}
-		globalAccessLogger.start()
+		if enabled {
+			logger.Info("access logger initialized")
+		}
 	})
 }
 
 // LogAccess records an access log entry
-// This is non-blocking - if buffer is full, log is dropped to prevent blocking main flow
+// This is a single, unified logging point - no duplicate logs
 func LogAccess(ctx context.Context, entry *AccessLogEntry) {
-	if globalAccessLogger == nil {
-		// Fallback: log directly if access logger not initialized
-		logAccessDirect(ctx, entry)
+	if globalAccessLogger == nil || !globalAccessLogger.enabled {
 		return
+	}
+
+	// Set timestamp if not already set
+	if entry.Timestamp == 0 {
+		entry.Timestamp = time.Now().UnixNano()
 	}
 
 	// Extract trace context
@@ -74,152 +87,155 @@ func LogAccess(ctx context.Context, entry *AccessLogEntry) {
 		entry.SpanID = span.SpanContext().SpanID().String()
 	}
 
-	entry.Timestamp = time.Now()
+	// Build fields array - only include non-zero/non-empty fields
+	fields := make([]zap.Field, 0, 16)
 
-	// Non-blocking send
-	select {
-	case globalAccessLogger.logChan <- entry:
-	default:
-		// Buffer full, log warning and drop entry
-		logger.L.Warn("access log buffer full, dropping entry",
-			zap.String("remote_addr", entry.RemoteAddr),
-		)
-	}
-}
-
-// logAccessDirect logs access entry directly (fallback when batcher not initialized)
-func logAccessDirect(ctx context.Context, entry *AccessLogEntry) {
-	span := trace.SpanFromContext(ctx)
-	if span.SpanContext().IsValid() {
-		entry.TraceID = span.SpanContext().TraceID().String()
-		entry.SpanID = span.SpanContext().SpanID().String()
-	}
-
-	fields := []zap.Field{
-		zap.String("remote_addr", entry.RemoteAddr),
-		zap.Int64("duration_ms", entry.DurationMs),
+	// Always include these
+	fields = append(fields,
+		zap.Int64("timestamp", entry.Timestamp),
+		zap.String("client.address", entry.ClientAddr),
 		zap.String("status", entry.Status),
+	)
+
+	// Duration
+	if entry.DurationNs > 0 {
+		fields = append(fields, zap.Int64("duration_ns", entry.DurationNs))
+		// Also add duration_ms for human readability
+		fields = append(fields, zap.Float64("duration_ms", float64(entry.DurationNs)/1e6))
 	}
 
+	// Trace context
 	if entry.TraceID != "" {
 		fields = append(fields, zap.String("trace_id", entry.TraceID))
 	}
 	if entry.SpanID != "" {
 		fields = append(fields, zap.String("span_id", entry.SpanID))
 	}
+
+	// Session
 	if entry.SessionID != 0 {
-		fields = append(fields, zap.Int64("session_id", entry.SessionID))
-	}
-	if entry.ServerType != 0 {
-		fields = append(fields, zap.Int("server_type", entry.ServerType))
-	}
-	if entry.WorldID != 0 {
-		fields = append(fields, zap.Int("world_id", entry.WorldID))
-	}
-	if entry.BackendAddr != "" {
-		fields = append(fields, zap.String("backend_addr", entry.BackendAddr))
-	}
-	if entry.BytesIn > 0 {
-		fields = append(fields, zap.Int64("bytes_in", entry.BytesIn))
-	}
-	if entry.BytesOut > 0 {
-		fields = append(fields, zap.Int64("bytes_out", entry.BytesOut))
-	}
-	if entry.Error != "" {
-		fields = append(fields, zap.String("error", entry.Error))
+		fields = append(fields, zap.Int64("session.id", entry.SessionID))
 	}
 
+	// Routing
+	if entry.ServerType != 0 {
+		fields = append(fields, zap.Int("server.type", entry.ServerType))
+	}
+	if entry.WorldID != 0 {
+		fields = append(fields, zap.Int("world.id", entry.WorldID))
+	}
+
+	// Backend
+	if entry.BackendAddr != "" {
+		fields = append(fields, zap.String("server.address", entry.BackendAddr))
+	}
+
+	// I/O metrics
+	if entry.BytesIn > 0 {
+		fields = append(fields, zap.Int64("network.io.receive", entry.BytesIn))
+	}
+	if entry.BytesOut > 0 {
+		fields = append(fields, zap.Int64("network.io.send", entry.BytesOut))
+	}
+
+	// Error
+	if entry.Error != "" {
+		fields = append(fields, zap.String("error.message", entry.Error))
+	}
+
+	// Add severity_number for OTel
+	fields = append(fields, zap.Int("severity_number", logger.SeverityInfo))
+
+	// Log with consistent message key
 	logger.L.Info("access_log", fields...)
 }
 
-// start starts the batch processing goroutine
-func (al *AccessLogger) start() {
-	al.wg.Add(1)
-	go al.processBatches()
-}
-
-// processBatches processes access logs in batches
-func (al *AccessLogger) processBatches() {
-	defer al.wg.Done()
-
-	batch := make([]*AccessLogEntry, 0, al.batchSize)
-	ticker := time.NewTicker(al.flushInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-al.stopChan:
-			// Flush remaining logs
-			if len(batch) > 0 {
-				al.flushBatch(batch)
-			}
-			return
-		case entry := <-al.logChan:
-			batch = append(batch, entry)
-			if len(batch) >= al.batchSize {
-				al.flushBatch(batch)
-				batch = batch[:0]
-			}
-		case <-ticker.C:
-			if len(batch) > 0 {
-				al.flushBatch(batch)
-				batch = batch[:0]
-			}
-		}
-	}
-}
-
-// flushBatch flushes a batch of access logs
-// In production, this could send to Kafka, ELK, or other log aggregation systems
-func (al *AccessLogger) flushBatch(batch []*AccessLogEntry) {
-	// For now, log each entry individually
-	// In production, you could:
-	// 1. Send to Kafka topic
-	// 2. Send to ELK via HTTP
-	// 3. Write to file for Fluentd/Fluent Bit to collect
-	for _, entry := range batch {
-		fields := []zap.Field{
-			zap.String("remote_addr", entry.RemoteAddr),
-			zap.Int64("duration_ms", entry.DurationMs),
-			zap.String("status", entry.Status),
-		}
-
-		if entry.TraceID != "" {
-			fields = append(fields, zap.String("trace_id", entry.TraceID))
-		}
-		if entry.SpanID != "" {
-			fields = append(fields, zap.String("span_id", entry.SpanID))
-		}
-		if entry.SessionID != 0 {
-			fields = append(fields, zap.Int64("session_id", entry.SessionID))
-		}
-		if entry.ServerType != 0 {
-			fields = append(fields, zap.Int("server_type", entry.ServerType))
-		}
-		if entry.WorldID != 0 {
-			fields = append(fields, zap.Int("world_id", entry.WorldID))
-		}
-		if entry.BackendAddr != "" {
-			fields = append(fields, zap.String("backend_addr", entry.BackendAddr))
-		}
-		if entry.BytesIn > 0 {
-			fields = append(fields, zap.Int64("bytes_in", entry.BytesIn))
-		}
-		if entry.BytesOut > 0 {
-			fields = append(fields, zap.Int64("bytes_out", entry.BytesOut))
-		}
-		if entry.Error != "" {
-			fields = append(fields, zap.String("error", entry.Error))
-		}
-
-		logger.L.Info("access_log", fields...)
-	}
-}
-
-// Shutdown gracefully shuts down the access logger
+// ShutdownAccessLogger gracefully shuts down the access logger
+// Simplified: no batching means no pending logs to flush
 func ShutdownAccessLogger() {
 	if globalAccessLogger != nil {
-		close(globalAccessLogger.stopChan)
-		globalAccessLogger.wg.Wait()
+		logger.Info("access logger shutdown")
 	}
+}
+
+// ============================================================================
+// Helper functions for common access log patterns
+// ============================================================================
+
+// LogSessionEstablished logs a successful session establishment
+// This is the ONLY log for session establishment - no duplicate
+func LogSessionEstablished(ctx context.Context, sessionID int64, clientAddr, backendAddr string, serverType, worldID int, durationNs int64) {
+	LogAccess(ctx, &AccessLogEntry{
+		SessionID:   sessionID,
+		ClientAddr:  clientAddr,
+		BackendAddr: backendAddr,
+		ServerType:  serverType,
+		WorldID:     worldID,
+		DurationNs:  durationNs,
+		Status:      "success",
+	})
+}
+
+// LogSessionClosed logs a session closure
+// This is the ONLY log for session closure - no duplicate
+func LogSessionClosed(ctx context.Context, sessionID int64, clientAddr, backendAddr string, serverType, worldID int, durationNs, bytesIn, bytesOut int64) {
+	LogAccess(ctx, &AccessLogEntry{
+		SessionID:   sessionID,
+		ClientAddr:  clientAddr,
+		BackendAddr: backendAddr,
+		ServerType:  serverType,
+		WorldID:     worldID,
+		DurationNs:  durationNs,
+		BytesIn:     bytesIn,
+		BytesOut:    bytesOut,
+		Status:      "closed",
+	})
+}
+
+// LogConnectionRejected logs a rejected connection
+func LogConnectionRejected(ctx context.Context, clientAddr, reason string) {
+	LogAccess(ctx, &AccessLogEntry{
+		ClientAddr: clientAddr,
+		Status:     "rejected",
+		Error:      reason,
+	})
+}
+
+// LogRoutingError logs a routing error
+func LogRoutingError(ctx context.Context, clientAddr string, serverType, worldID int, err error, durationNs int64) {
+	LogAccess(ctx, &AccessLogEntry{
+		ClientAddr: clientAddr,
+		ServerType: serverType,
+		WorldID:    worldID,
+		DurationNs: durationNs,
+		Status:     "error",
+		Error:      err.Error(),
+	})
+}
+
+// LogCircuitBreakerOpen logs circuit breaker rejection
+func LogCircuitBreakerOpen(ctx context.Context, clientAddr, backendAddr string, serverType, worldID int, durationNs int64) {
+	LogAccess(ctx, &AccessLogEntry{
+		ClientAddr:  clientAddr,
+		BackendAddr: backendAddr,
+		ServerType:  serverType,
+		WorldID:     worldID,
+		DurationNs:  durationNs,
+		Status:      "rejected",
+		Error:       "circuit breaker open",
+	})
+}
+
+// LogBackendError logs a backend connection/communication error
+func LogBackendError(ctx context.Context, sessionID int64, clientAddr, backendAddr string, serverType, worldID int, err error, durationNs int64) {
+	LogAccess(ctx, &AccessLogEntry{
+		SessionID:   sessionID,
+		ClientAddr:  clientAddr,
+		BackendAddr: backendAddr,
+		ServerType:  serverType,
+		WorldID:     worldID,
+		DurationNs:  durationNs,
+		Status:      "error",
+		Error:       err.Error(),
+	})
 }

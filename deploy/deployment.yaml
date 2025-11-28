@@ -27,6 +27,16 @@ spec:
         prometheus.io/path: "/metrics"
     spec:
       terminationGracePeriodSeconds: 3600
+      # Pod Anti-Affinity: prefer spreading across nodes
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: game-gateway
+                topologyKey: kubernetes.io/hostname
       imagePullSecrets:
         - name: harbor-credential
       containers:
@@ -41,6 +51,7 @@ spec:
               containerPort: 9090
               protocol: TCP
           env:
+            # Kubernetes Downward API
             - name: POD_NAME
               valueFrom:
                 fieldRef:
@@ -53,6 +64,21 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            # Logging
+            - name: LOG_LEVEL
+              value: "info"
+            # OpenTelemetry Tracing (OTLP → OTel Collector → Tempo)
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "otel-collector.observability.svc.cluster.local:4317"
+            # OTel Resource attributes (auto-detected, but can override)
+            - name: OTEL_SERVICE_NAME
+              value: "game-gateway"
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "service.namespace=hgame,deployment.environment=production"
           resources:
             requests:
               cpu: 1000m
@@ -97,6 +123,8 @@ metadata:
     app.kubernetes.io/component: gateway
 spec:
   type: NodePort
+  # Local traffic policy: avoid cross-node forwarding
+  externalTrafficPolicy: Local
   selector:
     app: game-gateway
   ports:

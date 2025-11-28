@@ -26,12 +26,30 @@ func main() {
 	flag.StringVar(&configPath, "config", "config/config.yaml", "Configuration file path")
 	flag.Parse()
 
-	// Initialize logger (read from environment variable or use default)
+	// Get Pod name (K8s environment)
+	podName := os.Getenv("POD_NAME")
+	if podName == "" {
+		// Fallback: use hostname
+		hostname, _ := os.Hostname()
+		podName = hostname
+	}
+
+	// Initialize logger with OpenTelemetry-compatible format
 	logLevel := os.Getenv("LOG_LEVEL")
 	if logLevel == "" {
 		logLevel = "info"
 	}
-	if err := logger.Init(logLevel); err != nil {
+
+	// Initialize logger with service info (OTel Resource attributes)
+	if err := logger.Init(logger.Config{
+		Level: logLevel,
+		ServiceInfo: logger.ServiceInfo{
+			Name:       "game-gateway",
+			Namespace:  os.Getenv("POD_NAMESPACE"),
+			InstanceID: podName,
+			Version:    version,
+		},
+	}); err != nil {
 		log.Fatalf("Failed to initialize logger: %v", err)
 	}
 	defer logger.Sync()
@@ -40,17 +58,6 @@ func main() {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		logger.L.Fatal("Failed to load configuration", zap.Error(err))
-	}
-
-	// Get Pod name (K8s environment)
-	podName := os.Getenv("POD_NAME")
-	if podName == "" {
-		// Fallback: use hostname
-		hostname, _ := os.Hostname()
-		podName = hostname
-		logger.L.Info("POD_NAME not found, using hostname",
-			zap.String("hostname", podName),
-		)
 	}
 
 	// Create gateway instance
@@ -68,17 +75,18 @@ func main() {
 		logger.L.Fatal("Failed to start gateway", zap.Error(err))
 	}
 
-	// Initialize tracing (optional, if Jaeger endpoint is provided)
-	jaegerEndpoint := os.Getenv("JAEGER_ENDPOINT")
-	if jaegerEndpoint != "" {
-		if err := tracing.Init("game-gateway", version, jaegerEndpoint); err != nil {
-			logger.L.Warn("Failed to initialize tracing", zap.Error(err))
+	// Initialize tracing (OTLP → OTel Collector → Tempo)
+	// Set OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector:4317
+	otelEndpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+	if otelEndpoint != "" {
+		if err := tracing.Init("game-gateway", version, otelEndpoint); err != nil {
+			logger.Warn("Failed to initialize tracing", zap.Error(err))
 		} else {
-			logger.L.Info("Tracing initialized", zap.String("endpoint", jaegerEndpoint))
+			logger.Info("Tracing initialized (OTLP)", zap.String("endpoint", otelEndpoint))
 		}
 	}
 
-	logger.L.Info("Game Gateway started successfully",
+	logger.Info("Game Gateway started successfully",
 		zap.String("version", version),
 		zap.String("build_time", buildTime),
 		zap.String("git_commit", gitCommit),
@@ -90,20 +98,20 @@ func main() {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan
 
-	logger.L.Info("Received stop signal, starting graceful shutdown...")
+	logger.Info("Received stop signal, starting graceful shutdown...")
 
 	// Graceful shutdown
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.GracefulShutdownTimeout)
 	defer shutdownCancel()
 
 	if err := gw.Shutdown(shutdownCtx); err != nil {
-		logger.L.Error("Error during gateway shutdown", zap.Error(err))
+		logger.Error("Error during gateway shutdown", zap.Error(err))
 	}
 
 	// Shutdown tracing
 	if err := tracing.Shutdown(shutdownCtx); err != nil {
-		logger.L.Warn("Error during tracing shutdown", zap.Error(err))
+		logger.Warn("Error during tracing shutdown", zap.Error(err))
 	}
 
-	logger.L.Info("Game Gateway closed")
+	logger.Info("Game Gateway closed")
 }
