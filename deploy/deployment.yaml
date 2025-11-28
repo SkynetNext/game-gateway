@@ -103,7 +103,12 @@ spec:
     - name: business
       port: 8080
       targetPort: 8080
-      nodePort: 30808
+      nodePort: 30621
+      protocol: TCP
+    - name: business-alt
+      port: 8082
+      targetPort: 8080
+      nodePort: 30622
       protocol: TCP
     - name: health
       port: 9090
