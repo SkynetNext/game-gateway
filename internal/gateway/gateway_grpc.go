@@ -2,11 +2,15 @@ package gateway
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 
 	gateway "github.com/SkynetNext/game-gateway/api"
 	"github.com/SkynetNext/game-gateway/internal/logger"
 	"github.com/SkynetNext/game-gateway/internal/protocol"
+	"github.com/SkynetNext/game-gateway/internal/tracing"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.uber.org/zap"
 )
 
@@ -48,6 +52,23 @@ func (g *Gateway) sendToSession(sessionID int64, packet *gateway.GamePacket) {
 
 // forwardGrpcConnection forwards data from client to GameServer via gRPC
 func (g *Gateway) forwardGrpcConnection(ctx context.Context, sessID int64, clientConn *protocol.SniffConn, backendAddr string, log *logger.ContextLogger, bytesIn, bytesOut *int64) {
+	// Create span for gRPC forwarding
+	ctx, span := tracing.StartSpan(ctx, "gateway.grpc_forward")
+	defer func() {
+		// Record final bytes transferred
+		span.SetAttributes(
+			attribute.Int64("bytes.in", atomic.LoadInt64(bytesIn)),
+			attribute.Int64("bytes.out", atomic.LoadInt64(bytesOut)),
+		)
+		span.End()
+	}()
+
+	span.SetAttributes(
+		attribute.Int64("session.id", sessID),
+		attribute.String("backend.address", backendAddr),
+		attribute.String("transport", "grpc"),
+	)
+
 	defer func() {
 		// Cleanup session
 		g.sessionManager.Remove(sessID)
@@ -57,10 +78,18 @@ func (g *Gateway) forwardGrpcConnection(ctx context.Context, sessID int64, clien
 	maxMessageSize := g.config.Security.MaxMessageSize
 	g.configMu.RUnlock()
 
+	packetCount := 0
 	for {
 		// Read Packet
 		header, data, err := protocol.ReadFullPacket(clientConn, maxMessageSize)
 		if err != nil {
+			if err != protocol.ErrMessageTooLarge {
+				// Normal close (EOF), not an error
+				span.SetStatus(codes.Ok, "connection closed")
+			} else {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, "read packet failed")
+			}
 			return
 		}
 
@@ -74,10 +103,13 @@ func (g *Gateway) forwardGrpcConnection(ctx context.Context, sessID int64, clien
 
 		err = g.grpcManager.Send(ctx, backendAddr, packet)
 		if err != nil {
-			logger.Error("failed to send grpc packet", zap.Error(err))
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "grpc send failed")
+			log.Error("failed to send grpc packet", zap.Error(err))
 			return
 		}
 
-		*bytesIn += int64(len(data))
+		atomic.AddInt64(bytesIn, int64(len(data)))
+		packetCount++
 	}
 }

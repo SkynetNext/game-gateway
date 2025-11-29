@@ -33,6 +33,8 @@ import (
 	"github.com/SkynetNext/game-gateway/internal/tracing"
 	grpcmgr "github.com/SkynetNext/game-gateway/internal/transport/grpc"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 )
@@ -688,9 +690,21 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 	// Generate session ID
 	sessionID := g.generateSessionID()
 
+	// Start routing span
+	ctx, routeSpan := tracing.StartSpan(ctx, "gateway.route_to_backend")
+	routeSpan.SetAttributes(
+		attribute.Int("server.type", int(serverType)),
+		attribute.Int("world.id", int(worldID)),
+		attribute.Int("instance.id", int(instID)),
+		attribute.Int64("session.id", sessionID),
+	)
+
 	// Route to backend service
 	backendAddr, err := g.routeToBackend(ctx, int(serverType), int(worldID), int(instID))
 	if err != nil {
+		routeSpan.RecordError(err)
+		routeSpan.SetStatus(codes.Error, "routing failed")
+		routeSpan.End()
 		metrics.RoutingErrors.WithLabelValues("not_found").Inc()
 		connStats.status = "error"
 		connStats.errorMsg = fmt.Sprintf("routing failed: %v", err)
@@ -699,9 +713,14 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 		return
 	}
 
+	routeSpan.SetAttributes(attribute.String("backend.address", backendAddr))
+
 	// Check circuit breaker
 	breaker := g.getOrCreateBreaker(backendAddr)
 	if !breaker.Allow() {
+		routeSpan.RecordError(fmt.Errorf("circuit breaker open"))
+		routeSpan.SetStatus(codes.Error, "circuit breaker open")
+		routeSpan.End()
 		metrics.RoutingErrors.WithLabelValues("circuit_breaker_open").Inc()
 		connStats.status = "error"
 		connStats.errorMsg = "circuit breaker open"
@@ -730,6 +749,9 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 			return err
 		})
 		if err != nil {
+			routeSpan.RecordError(err)
+			routeSpan.SetStatus(codes.Error, "connection failed")
+			routeSpan.End()
 			metrics.RoutingErrors.WithLabelValues("connection_failed").Inc()
 			connStats.status = "error"
 			connStats.errorMsg = fmt.Sprintf("backend connection failed: %v", err)
@@ -740,6 +762,10 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 			return
 		}
 	}
+
+	// Routing successful
+	routeSpan.SetStatus(codes.Ok, "routed")
+	routeSpan.End()
 
 	// Ensure connection is returned to pool even on panic
 	defer func() {
@@ -878,6 +904,23 @@ func extractTraceContext(ctx context.Context) map[string]string {
 
 // forwardConnection forwards data bidirectionally between client and backend
 func (g *Gateway) forwardConnection(ctx context.Context, sess *session.Session, log *logger.ContextLogger, bytesIn, bytesOut *int64) {
+	// Create span for connection forwarding
+	ctx, span := tracing.StartSpan(ctx, "gateway.forward_connection")
+	defer func() {
+		// Record final bytes transferred
+		span.SetAttributes(
+			attribute.Int64("bytes.in", atomic.LoadInt64(bytesIn)),
+			attribute.Int64("bytes.out", atomic.LoadInt64(bytesOut)),
+		)
+		span.End()
+	}()
+
+	span.SetAttributes(
+		attribute.Int64("session.id", sess.SessionID),
+		attribute.String("client.address", sess.ClientConn.RemoteAddr().String()),
+		attribute.String("backend.address", sess.BackendConn.RemoteAddr().String()),
+	)
+
 	// Get timeouts from config (thread-safe read)
 	g.configMu.RLock()
 	readTimeout := g.config.ConnectionPool.ReadTimeout

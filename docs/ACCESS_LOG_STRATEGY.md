@@ -95,19 +95,32 @@ Logged once per connection at connection close:
 
 Distributed tracing provides detailed operation timeline:
 
+**TCP Mode**:
+```
+Trace: 198b9595f4fc021850e0259c5e1d40cc (40.02s total)
+├─ gateway.handle_connection (40.02s)           ← Root span
+│  ├─ gateway.handle_tcp_connection (10.02s)    ← TCP processing
+│  │  ├─ gateway.route_to_backend (1ms)         ← Routing & connection
+│  │  └─ gateway.forward_connection (10.01s)    ← Data forwarding
+│  └─ Access Log ✅                              ← Single log at end
+```
+
+**gRPC Mode**:
 ```
 Trace: 198b9595f4fc021850e0259c5e1d40cc (40.02s total)
 ├─ gateway.handle_connection (40.02s)           ← Root span
 │  ├─ gateway.handle_tcp_connection (10.02s)    ← TCP processing
 │  │  ├─ gateway.route_to_backend (1ms)         ← Routing
-│  │  └─ gateway.forward_connection (10.01s)    ← Data forwarding
+│  │  │  └─ gateway.grpc_connect (50ms)         ← gRPC connection (first time)
+│  │  └─ gateway.grpc_forward (10.01s)          ← gRPC forwarding
 │  └─ Access Log ✅                              ← Single log at end
 ```
 
 **Key Points**:
 - Root span: Entire connection lifecycle
-- Child spans: Detailed operations (routing, forwarding, etc.)
+- Child spans: Detailed operations (routing, forwarding, gRPC)
 - Access log: Business metrics summary
+- Error recording: All errors recorded to spans for debugging
 
 ## Benefits
 

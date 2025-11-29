@@ -355,10 +355,67 @@ Batched access logs with Trace ID:
 
 ### Trace Spans
 
-- `gateway.handle_connection`: Connection handling
-- `gateway.handle_tcp_connection`: TCP protocol handling
-- `gateway.route_to_backend`: Backend routing
-- `gateway.forward_connection`: Message forwarding
+The gateway creates the following spans for distributed tracing:
+
+#### TCP Mode Spans
+
+1. **`gateway.handle_connection`** (Root span)
+   - Duration: Entire connection lifecycle
+   - Attributes: `client.address`, `session.id`, `status`, `bytes.in`, `bytes.out`
+   - Error recording: Connection-level errors
+
+2. **`gateway.handle_tcp_connection`** (Child of handle_connection)
+   - Duration: TCP protocol processing
+   - Attributes: Protocol-specific metadata
+   - Error recording: Protocol errors, read/write failures
+
+3. **`gateway.route_to_backend`** (Child of handle_tcp_connection)
+   - Duration: Backend routing and connection establishment
+   - Attributes: `server.type`, `world.id`, `instance.id`, `backend.address`, `session.id`
+   - Error recording: Routing failures, circuit breaker events, connection pool errors
+
+4. **`gateway.forward_connection`** (Child of handle_tcp_connection)
+   - Duration: Bidirectional data forwarding
+   - Attributes: `session.id`, `client.address`, `backend.address`, `bytes.in`, `bytes.out`
+   - Error recording: Data transfer errors
+
+#### gRPC Mode Spans
+
+1. **`gateway.grpc_connect`** (Created on first connection to backend)
+   - Duration: gRPC connection establishment
+   - Attributes: `backend.address`, `gateway.id`, `transport=grpc`
+   - Error recording: Dial failures, stream creation errors
+
+2. **`gateway.grpc_forward`** (Replaces forward_connection in gRPC mode)
+   - Duration: Client to server packet forwarding via gRPC
+   - Attributes: `session.id`, `backend.address`, `transport=grpc`, `bytes.in`, `bytes.out`
+   - Error recording: Packet read errors, gRPC send failures
+
+### Span Hierarchy
+
+#### TCP Mode
+```
+gateway.handle_connection (40s)
+├─ gateway.handle_tcp_connection (40s)
+│  ├─ gateway.route_to_backend (100ms)
+│  └─ gateway.forward_connection (39.9s)
+```
+
+#### gRPC Mode
+```
+gateway.handle_connection (40s)
+├─ gateway.handle_tcp_connection (40s)
+│  ├─ gateway.route_to_backend (100ms)
+│  │  └─ gateway.grpc_connect (50ms, first time only)
+│  └─ gateway.grpc_forward (39.9s)
+```
+
+### Error Recording
+
+All spans record errors using OpenTelemetry standard conventions:
+- `span.RecordError(err)`: Records the error details
+- `span.SetStatus(codes.Error, "description")`: Marks span as failed
+- Errors are visible in Grafana Tempo for debugging
 
 ## Alerting
 

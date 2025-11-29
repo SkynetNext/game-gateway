@@ -7,6 +7,9 @@ import (
 
 	gateway "github.com/SkynetNext/game-gateway/api"
 	"github.com/SkynetNext/game-gateway/internal/logger"
+	"github.com/SkynetNext/game-gateway/internal/tracing"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -63,25 +66,42 @@ func (m *Manager) getClient(ctx context.Context, address string) (*Client, error
 		return client, nil
 	}
 
-	// Create new connection
-	conn, err := grpc.Dial(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// Create span for gRPC connection establishment
+	spanCtx, span := tracing.StartSpan(ctx, "gateway.grpc_connect")
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.String("backend.address", address),
+		attribute.Int("gateway.id", int(m.gatewayID)),
+		attribute.String("transport", "grpc"),
+	)
+
+	// Create new connection using NewClient (replaces deprecated Dial/DialContext)
+	// Note: NewClient returns a client that is initially idle and doesn't connect immediately
+	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		return nil, fmt.Errorf("failed to dial %s: %w", address, err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "dial failed")
+		return nil, fmt.Errorf("failed to create client for %s: %w", address, err)
 	}
 
 	svcClient := gateway.NewGameGatewayServiceClient(conn)
 
-	// Create stream with metadata
+	// Create stream with metadata and trace context
 	md := metadata.Pairs("gate-id", fmt.Sprintf("%d", m.gatewayID))
-	streamCtx, cancel := context.WithCancel(context.Background())
+	streamCtx, cancel := context.WithCancel(spanCtx) // Use span context to propagate trace
 	streamCtx = metadata.NewOutgoingContext(streamCtx, md)
 
 	stream, err := svcClient.StreamPackets(streamCtx)
 	if err != nil {
 		cancel()
 		conn.Close()
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "create stream failed")
 		return nil, fmt.Errorf("failed to create stream to %s: %w", address, err)
 	}
+
+	span.SetStatus(codes.Ok, "connected")
 
 	// Start receiving goroutine
 	go m.recvLoop(address, stream)
