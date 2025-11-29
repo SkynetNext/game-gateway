@@ -198,6 +198,7 @@ func (g *Gateway) Start(ctx context.Context) error {
 	if err := g.startListener(g.ctx); err != nil {
 		return fmt.Errorf("failed to start listener: %w", err)
 	}
+	logger.Info("gateway listener started", zap.String("address", g.config.Server.ListenAddr))
 
 	return nil
 }
@@ -335,6 +336,7 @@ func (g *Gateway) startListener(ctx context.Context) error {
 		g.acceptLoop(ctx)
 	}()
 
+	logger.Info("listener accepting connections", zap.String("address", g.config.Server.ListenAddr))
 	return nil
 }
 
