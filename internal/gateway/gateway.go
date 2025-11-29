@@ -364,6 +364,13 @@ func (g *Gateway) acceptLoop(ctx context.Context) {
 				continue
 			}
 
+			// Set TCP_NODELAY for all connections (TCP and WebSocket)
+			// This ensures immediate send for small packets (handshakes, game protocol)
+			// Critical for low-latency requirements
+			if tcpConn, ok := conn.(*net.TCPConn); ok {
+				_ = tcpConn.SetNoDelay(true)
+			}
+
 			// Set connection timeouts
 			if err := conn.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
 				conn.Close()
