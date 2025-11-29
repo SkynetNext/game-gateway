@@ -404,6 +404,9 @@ func (g *Gateway) handleConnection(ctx context.Context, conn net.Conn) {
 	remoteAddr := conn.RemoteAddr().String()
 	startTime := time.Now()
 
+	// Log connection accepted (for debugging Accept -> handleConnection latency)
+	logger.Info("connection accepted", zap.String("remote_addr", remoteAddr))
+
 	// Create span for distributed tracing
 	ctx, span := tracing.StartSpan(ctx, "gateway.handle_connection")
 	defer span.End()
