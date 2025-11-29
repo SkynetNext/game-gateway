@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -338,53 +339,58 @@ func (g *Gateway) startListener(ctx context.Context) error {
 }
 
 // acceptLoop accepts incoming connections
+// Simplified implementation following unified-access-gateway pattern
+// Removed SetDeadline on listener to avoid Accept delays
 func (g *Gateway) acceptLoop(ctx context.Context) {
 	for {
+		// Check context cancellation before Accept (non-blocking)
 		select {
 		case <-ctx.Done():
 			return
 		default:
-			// Set accept timeout to allow context cancellation check
-			if tcpListener, ok := g.listener.(*net.TCPListener); ok {
-				tcpListener.SetDeadline(time.Now().Add(1 * time.Second))
-			}
-
-			conn, err := g.listener.Accept()
-			if err != nil {
-				// Check if listener was closed (normal shutdown)
-				if atomic.LoadInt32(&g.draining) == 1 {
-					return
-				}
-				// Check for timeout (expected when checking context)
-				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-					continue
-				}
-				// Log other errors
-				logger.Warn("accept connection error", zap.Error(err))
-				continue
-			}
-
-			// Set TCP_NODELAY for all connections (TCP and WebSocket)
-			// This ensures immediate send for small packets (handshakes, game protocol)
-			// Critical for low-latency requirements
-			if tcpConn, ok := conn.(*net.TCPConn); ok {
-				_ = tcpConn.SetNoDelay(true)
-			}
-
-			// Set connection timeouts
-			if err := conn.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
-				conn.Close()
-				logger.Debug("failed to set initial read deadline", zap.Error(err))
-				continue
-			}
-
-			// Handle connection in goroutine
-			g.wg.Add(1)
-			go func(c net.Conn) {
-				defer g.wg.Done()
-				g.handleConnection(ctx, c)
-			}(conn)
 		}
+
+		conn, err := g.listener.Accept()
+		if err != nil {
+			// Check if listener was closed (normal shutdown)
+			if atomic.LoadInt32(&g.draining) == 1 {
+				return
+			}
+			// Check for temporary errors (network issues, can retry)
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Temporary() {
+				logger.Debug("temporary accept error", zap.Error(err))
+				continue
+			}
+			// Check for timeout errors (should not happen without SetDeadline, but handle gracefully)
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
+			}
+			// Log other errors
+			logger.Warn("accept connection error", zap.Error(err))
+			continue
+		}
+
+		// Set TCP_NODELAY for all connections (TCP and WebSocket)
+		// This ensures immediate send for small packets (handshakes, game protocol)
+		// Critical for low-latency requirements
+		if tcpConn, ok := conn.(*net.TCPConn); ok {
+			_ = tcpConn.SetNoDelay(true)
+		}
+
+		// Set connection timeouts
+		if err := conn.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
+			conn.Close()
+			logger.Debug("failed to set initial read deadline", zap.Error(err))
+			continue
+		}
+
+		// Handle connection in goroutine
+		g.wg.Add(1)
+		go func(c net.Conn) {
+			defer g.wg.Done()
+			g.handleConnection(ctx, c)
+		}(conn)
 	}
 }
 
