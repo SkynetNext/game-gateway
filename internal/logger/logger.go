@@ -25,11 +25,11 @@ const (
 // ServiceInfo holds service metadata for structured logging
 // Follows OpenTelemetry Semantic Conventions for Resources
 // https://opentelemetry.io/docs/specs/semconv/resource/
+// Note: service.instance.id is added by Fluent Bit from Pod name (infrastructure layer)
 type ServiceInfo struct {
-	Name       string // service.name
-	Namespace  string // service.namespace
-	InstanceID string // service.instance.id (Pod name in K8s)
-	Version    string // service.version
+	Name      string // service.name
+	Namespace string // service.namespace (from POD_NAMESPACE env var)
+	Version   string // service.version
 }
 
 var (
@@ -56,18 +56,16 @@ func Init(cfg Config) error {
 	initOnce.Do(func() {
 		serviceInfo = cfg.ServiceInfo
 
-		// Get Pod name from environment (Kubernetes downward API)
-		if serviceInfo.InstanceID == "" {
-			serviceInfo.InstanceID = os.Getenv("POD_NAME")
-		}
+		// Get service name (application defines its own name)
 		if serviceInfo.Name == "" {
 			serviceInfo.Name = "game-gateway"
 		}
-		if serviceInfo.Namespace == "" {
-			serviceInfo.Namespace = os.Getenv("POD_NAMESPACE")
-			if serviceInfo.Namespace == "" {
-				serviceInfo.Namespace = "hgame"
-			}
+		// Note: service.instance.id is added by Fluent Bit from Pod name (infrastructure layer)
+		// Always prefer POD_NAMESPACE from environment (infrastructure layer)
+		// This ensures consistency with tracing.go and K8s metadata
+		// Only use provided Namespace if POD_NAMESPACE is not available
+		if podNamespace := os.Getenv("POD_NAMESPACE"); podNamespace != "" {
+			serviceInfo.Namespace = podNamespace
 		}
 
 		var zapLevel zapcore.Level
@@ -118,9 +116,9 @@ func Init(cfg Config) error {
 		// Build logger with default fields (OTel Resource attributes)
 		// Application-level attributes (should be set by application)
 		L = zap.New(core, zap.AddCaller(), zap.AddStacktrace(zapcore.ErrorLevel)).With(
-			// OpenTelemetry Resource Semantic Conventions - Application Layer
+			// OpenTelemetry Resource Semantic Conventions
 			zap.String("service.name", serviceInfo.Name),           // Application defines its name
-			zap.String("service.namespace", serviceInfo.Namespace), // Business namespace
+			zap.String("service.namespace", serviceInfo.Namespace), // From POD_NAMESPACE (K8s namespace)
 			// Note: service.instance.id is added by Fluent Bit (infrastructure layer)
 		)
 
