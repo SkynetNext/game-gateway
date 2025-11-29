@@ -22,10 +22,23 @@ func NewSniffConn(conn net.Conn) *SniffConn {
 }
 
 // Sniff detects the protocol type by peeking at the first few bytes
+// Sets a short read deadline to prevent hanging on slow/malicious connections
+// Following unified-access-gateway pattern: 500ms timeout for protocol detection
 func (s *SniffConn) Sniff() (ProtocolType, []byte, error) {
+	// Set a short read deadline (500ms) to prevent blocking
+	// If data is available, Peek will return immediately
+	// If not, we'll timeout quickly instead of waiting for the connection's long deadline
+	s.Conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	defer s.Conn.SetReadDeadline(time.Time{}) // Clear deadline after sniffing
+
 	// Peek first 4 bytes to detect protocol
 	peeked, err := s.br.Peek(4)
 	if err != nil {
+		// If timeout, return TCP as default (data may arrive later)
+		// This prevents blocking on slow clients
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			return ProtocolTCP, nil, nil // Return nil error for timeout (expected for slow clients)
+		}
 		return ProtocolTCP, nil, err
 	}
 

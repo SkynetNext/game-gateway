@@ -404,19 +404,12 @@ func (g *Gateway) handleConnection(ctx context.Context, conn net.Conn) {
 	remoteAddr := conn.RemoteAddr().String()
 	startTime := time.Now()
 
-	// Log connection accepted (for debugging Accept -> handleConnection latency)
-	logger.Info("DEBUG:connection accepted", zap.String("remote_addr", remoteAddr))
-
 	// Create span for distributed tracing
-	logger.Info("DEBUG:before StartSpan", zap.String("remote_addr", remoteAddr))
 	ctx, span := tracing.StartSpan(ctx, "gateway.handle_connection")
-	logger.Info("DEBUG:after StartSpan", zap.String("remote_addr", remoteAddr))
 	defer span.End()
 
 	// Create context logger for this connection (caches trace context)
-	logger.Info("DEBUG:before NewContextLogger", zap.String("remote_addr", remoteAddr))
 	log := logger.NewContextLogger(ctx)
-	logger.Info("DEBUG:after NewContextLogger", zap.String("remote_addr", remoteAddr))
 
 	// Connection-level statistics (shared with sub-handlers)
 	connStats := &connectionStats{
@@ -451,27 +444,21 @@ func (g *Gateway) handleConnection(ctx context.Context, conn net.Conn) {
 	ip := extractIP(remoteAddr)
 
 	// IP-based rate limiting: check if connection from this IP is allowed
-	logger.Info("DEBUG:before ipLimiter.Allow", zap.String("remote_addr", remoteAddr), zap.String("ip", ip))
 	if !g.ipLimiter.Allow(ip) {
-		logger.Info("DEBUG:after ipLimiter.Allow (rejected)", zap.String("remote_addr", remoteAddr))
 		metrics.RateLimitRejected.Inc()
 		connStats.status = "rejected"
 		connStats.errorMsg = "IP rate limit exceeded"
 		return
 	}
-	logger.Info("DEBUG:after ipLimiter.Allow (allowed)", zap.String("remote_addr", remoteAddr))
 	defer g.ipLimiter.Release(ip)
 
 	// Global rate limiting: check if connection is allowed
-	logger.Info("DEBUG:before rateLimiter.Allow", zap.String("remote_addr", remoteAddr))
 	if !g.rateLimiter.Allow() {
-		logger.Info("DEBUG:after rateLimiter.Allow (rejected)", zap.String("remote_addr", remoteAddr))
 		metrics.RateLimitRejected.Inc()
 		connStats.status = "rejected"
 		connStats.errorMsg = "connection rate limit exceeded"
 		return
 	}
-	logger.Info("DEBUG:after rateLimiter.Allow (allowed)", zap.String("remote_addr", remoteAddr))
 	defer g.rateLimiter.Release()
 
 	metrics.TotalConnections.Inc()
@@ -479,14 +466,10 @@ func (g *Gateway) handleConnection(ctx context.Context, conn net.Conn) {
 	defer metrics.ActiveConnections.Dec()
 
 	// Create sniffed connection
-	logger.Info("DEBUG:before NewSniffConn", zap.String("remote_addr", remoteAddr))
 	sniffConn := protocol.NewSniffConn(conn)
-	logger.Info("DEBUG:after NewSniffConn", zap.String("remote_addr", remoteAddr))
 
 	// Sniff protocol
-	logger.Info("DEBUG:before Sniff()", zap.String("remote_addr", remoteAddr))
 	protoType, peekedData, err := sniffConn.Sniff()
-	logger.Info("DEBUG:after Sniff()", zap.String("remote_addr", remoteAddr), zap.Error(err))
 	if err != nil {
 		connStats.status = "error"
 		connStats.errorMsg = "protocol sniff failed: " + err.Error()
