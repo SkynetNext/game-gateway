@@ -72,6 +72,10 @@ type Gateway struct {
 	// State
 	draining int32 // Atomic: 0=Running, 1=Draining
 	wg       sync.WaitGroup
+
+	// Context for graceful shutdown
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // connectionStats holds connection-level statistics
@@ -138,8 +142,11 @@ func New(cfg *config.Config, podName string) (*Gateway, error) {
 
 // Start starts the gateway service
 func (g *Gateway) Start(ctx context.Context) error {
+	// Create cancellable context for graceful shutdown
+	g.ctx, g.cancel = context.WithCancel(ctx)
+
 	// 1. Load initial routing rules and realm mapping from Redis
-	if err := g.loadConfigFromRedis(ctx); err != nil {
+	if err := g.loadConfigFromRedis(g.ctx); err != nil {
 		return fmt.Errorf("failed to load initial config: %w", err)
 	}
 
@@ -148,7 +155,7 @@ func (g *Gateway) Start(ctx context.Context) error {
 	go func() {
 		defer g.wg.Done()
 		g.redisClient.RefreshLoop(
-			ctx,
+			g.ctx,
 			g.config.Routing.RefreshInterval,
 			g.onRoutingRulesUpdate,
 			g.onRealmMappingUpdate,
@@ -159,7 +166,7 @@ func (g *Gateway) Start(ctx context.Context) error {
 	g.wg.Add(1)
 	go func() {
 		defer g.wg.Done()
-		g.poolManager.StartCleanup(ctx, 1*time.Minute)
+		g.poolManager.StartCleanup(g.ctx, 1*time.Minute)
 	}()
 
 	// 4. Start session cleanup
@@ -170,7 +177,7 @@ func (g *Gateway) Start(ctx context.Context) error {
 		defer ticker.Stop()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-g.ctx.Done():
 				return
 			case <-ticker.C:
 				g.sessionManager.CleanupIdle(30 * time.Minute)
@@ -182,12 +189,12 @@ func (g *Gateway) Start(ctx context.Context) error {
 	middleware.InitAccessLogger(true)
 
 	// 6. Start metrics and health check server
-	if err := g.startMetricsServer(ctx); err != nil {
+	if err := g.startMetricsServer(g.ctx); err != nil {
 		return fmt.Errorf("failed to start metrics server: %w", err)
 	}
 
 	// 7. Start business listener
-	if err := g.startListener(ctx); err != nil {
+	if err := g.startListener(g.ctx); err != nil {
 		return fmt.Errorf("failed to start listener: %w", err)
 	}
 
@@ -199,12 +206,17 @@ func (g *Gateway) Shutdown(ctx context.Context) error {
 	// 1. Enter drain mode
 	atomic.StoreInt32(&g.draining, 1)
 
-	// 2. Stop accepting new connections
+	// 2. Cancel context to stop all goroutines (including acceptLoop)
+	if g.cancel != nil {
+		g.cancel()
+	}
+
+	// 3. Stop accepting new connections
 	if g.listener != nil {
 		g.listener.Close()
 	}
 
-	// 3. Wait for active connections to close (with timeout)
+	// 4. Wait for active connections to close (with timeout)
 	done := make(chan struct{})
 	go func() {
 		g.wg.Wait()
@@ -218,17 +230,17 @@ func (g *Gateway) Shutdown(ctx context.Context) error {
 		// Timeout reached
 	}
 
-	// 4. Close all connection pools
+	// 5. Close all connection pools
 	if err := g.poolManager.Close(); err != nil {
 		return fmt.Errorf("failed to close connection pools: %w", err)
 	}
 
-	// 5. Close Redis connection
+	// 6. Close Redis connection
 	if err := g.redisClient.Close(); err != nil {
 		return fmt.Errorf("failed to close Redis connection: %w", err)
 	}
 
-	// 6. Shutdown metrics server
+	// 7. Shutdown metrics server
 	if g.metricsServer != nil {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
