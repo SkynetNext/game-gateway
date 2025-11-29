@@ -549,19 +549,6 @@ func (g *Gateway) handleWebSocketConnection(ctx context.Context, conn *protocol.
 	}
 
 	subprotocol := selectWebSocketSubprotocol(req.Header.Values("Sec-WebSocket-Protocol"))
-
-	// Log WebSocket handshake request details
-	log.Info("WebSocket handshake request",
-		zap.String("remote_addr", remoteAddr),
-		zap.String("request_method", req.Method),
-		zap.String("request_path", req.URL.Path),
-		zap.String("request_upgrade", req.Header.Get("Upgrade")),
-		zap.String("request_connection", req.Header.Get("Connection")),
-		zap.String("request_ws_key", req.Header.Get("Sec-WebSocket-Key")),
-		zap.String("request_ws_version", req.Header.Get("Sec-WebSocket-Version")),
-		zap.String("request_ws_protocol", req.Header.Get("Sec-WebSocket-Protocol")),
-	)
-
 	if err := writeWebSocketHandshake(conn.Conn, acceptKey, subprotocol); err != nil {
 		log.Warn("failed to write WebSocket handshake response",
 			zap.String("remote_addr", remoteAddr),
@@ -572,14 +559,6 @@ func (g *Gateway) handleWebSocketConnection(ctx context.Context, conn *protocol.
 		return
 	}
 
-	// Log WebSocket handshake response
-	log.Info("WebSocket handshake completed",
-		zap.String("remote_addr", remoteAddr),
-		zap.String("accept_key", acceptKey),
-		zap.String("subprotocol", subprotocol),
-		zap.String("response_status", "101 Switching Protocols"),
-	)
-
 	// Clear read deadline after handshake - WebSocket connections should wait for frames without timeout
 	_ = conn.Conn.SetReadDeadline(time.Time{})
 
@@ -589,14 +568,7 @@ func (g *Gateway) handleWebSocketConnection(ctx context.Context, conn *protocol.
 
 	wsConn := protocol.NewWebSocketConn(conn.Conn, conn.Reader(), maxMessageSize)
 
-	// Log that we're ready to receive first packet after handshake
-	log.Info("WebSocket connection ready, waiting for first packet",
-		zap.String("remote_addr", remoteAddr),
-	)
-
 	// Bridge to TCP handler
-	// Note: WebSocket handshake is completed before routing/backend connection
-	// This is standard practice: handshake is HTTP-level, routing info is in first data packet
 	g.handleTCPConnection(ctx, wsConn, log, connStats)
 }
 
@@ -997,20 +969,13 @@ func (g *Gateway) forwardConnection(ctx context.Context, sess *session.Session, 
 	clientReader := protocol.NewSniffConn(sess.ClientConn)
 	backendWriter := sess.BackendConn
 
-	// Create context for connection lifecycle
-	// Best practice: Context is controlled by connection lifecycle, not function return
-	// When either direction closes, cancel context to signal the other direction
+	// Use context with timeout for connection lifecycle
 	ctx, cancel := context.WithCancel(ctx)
-	// Note: Don't defer cancel() here - let goroutines control lifecycle
-
-	// Track which direction has closed
-	var wg sync.WaitGroup
-	wg.Add(2)
+	defer cancel()
 
 	// Forward client -> backend
 	go func() {
-		defer wg.Done()
-		defer cancel() // Signal other direction when this exits
+		defer cancel()
 		defer func() {
 			if sess.BackendConn != nil {
 				sess.BackendConn.Close()
@@ -1084,117 +1049,109 @@ func (g *Gateway) forwardConnection(ctx context.Context, sess *session.Session, 
 	}()
 
 	// Forward backend -> client
-	go func() {
-		defer wg.Done()
-		defer cancel() // Signal other direction when this exits
-		defer sess.ClientConn.Close()
+	defer sess.ClientConn.Close()
 
-		if err := sess.BackendConn.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
+	if err := sess.BackendConn.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
+		return
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
 			return
-		}
-
-		for {
-			select {
-			case <-ctx.Done():
+		default:
+			if err := sess.BackendConn.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
 				return
-			default:
-				if err := sess.BackendConn.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
-					return
+			}
+
+			serverHeader, err := protocol.ReadServerMessageHeader(sess.BackendConn)
+			if err != nil {
+				return
+			}
+
+			gateHeader, gateErr := protocol.ReadGateMsgHeader(sess.BackendConn)
+			if gateErr != nil {
+				return
+			}
+			_ = gateHeader.OpCode
+
+			expectedDataLen := int(serverHeader.Length) - protocol.GateMsgHeaderSize
+			messageDataLen := expectedDataLen
+			if messageDataLen < 0 {
+				log.Warn("invalid message length",
+					zap.Int64("session_id", sess.SessionID),
+					zap.Int32("total_length", serverHeader.Length),
+				)
+				return
+			}
+
+			var messageData []byte
+			var pooledBuf []byte
+			if messageDataLen > 0 {
+				if messageDataLen <= 8192 {
+					pooledBuf = buffer.Get()
+					messageData = pooledBuf[:messageDataLen]
+				} else {
+					messageData = make([]byte, messageDataLen)
 				}
-
-				serverHeader, err := protocol.ReadServerMessageHeader(sess.BackendConn)
-				if err != nil {
-					return
-				}
-
-				gateHeader, gateErr := protocol.ReadGateMsgHeader(sess.BackendConn)
-				if gateErr != nil {
-					return
-				}
-				_ = gateHeader.OpCode
-
-				expectedDataLen := int(serverHeader.Length) - protocol.GateMsgHeaderSize
-				messageDataLen := expectedDataLen
-				if messageDataLen < 0 {
-					log.Warn("invalid message length",
-						zap.Int64("session_id", sess.SessionID),
-						zap.Int32("total_length", serverHeader.Length),
-					)
-					return
-				}
-
-				var messageData []byte
-				var pooledBuf []byte
-				if messageDataLen > 0 {
-					if messageDataLen <= 8192 {
-						pooledBuf = buffer.Get()
-						messageData = pooledBuf[:messageDataLen]
-					} else {
-						messageData = make([]byte, messageDataLen)
-					}
-					if _, err := io.ReadFull(sess.BackendConn, messageData); err != nil {
-						if pooledBuf != nil {
-							buffer.Put(pooledBuf)
-						}
-						return
-					}
-				}
-
-				// Track bytes
-				atomic.AddInt64(bytesOut, int64(messageDataLen))
-
-				if err := sess.ClientConn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
+				if _, err := io.ReadFull(sess.BackendConn, messageData); err != nil {
 					if pooledBuf != nil {
 						buffer.Put(pooledBuf)
 					}
 					return
 				}
+			}
 
-				clientHeader := protocol.ClientMessageHeader{
-					Length:    uint16(messageDataLen),
-					MessageID: uint16(serverHeader.Type),
-					ServerID:  0,
-				}
-				if err := binary.Write(sess.ClientConn, binary.LittleEndian, clientHeader.Length); err != nil {
-					if pooledBuf != nil {
-						buffer.Put(pooledBuf)
-					}
-					return
-				}
-				if err := binary.Write(sess.ClientConn, binary.LittleEndian, clientHeader.MessageID); err != nil {
-					if pooledBuf != nil {
-						buffer.Put(pooledBuf)
-					}
-					return
-				}
-				if err := binary.Write(sess.ClientConn, binary.LittleEndian, clientHeader.ServerID); err != nil {
-					if pooledBuf != nil {
-						buffer.Put(pooledBuf)
-					}
-					return
-				}
-				if len(messageData) > 0 {
-					if _, err := sess.ClientConn.Write(messageData); err != nil {
-						if pooledBuf != nil {
-							buffer.Put(pooledBuf)
-						}
-						return
-					}
-				}
+			// Track bytes
+			atomic.AddInt64(bytesOut, int64(messageDataLen))
 
+			if err := sess.ClientConn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
 				if pooledBuf != nil {
 					buffer.Put(pooledBuf)
 				}
-
-				sess.LastActiveAt = time.Now()
-				metrics.MessagesProcessed.WithLabelValues("backend_to_client", sess.ServiceType).Inc()
+				return
 			}
-		}
-	}()
 
-	// Wait for either direction to complete (best practice for long-lived connections)
-	// This ensures the function doesn't return until connection is closed
-	wg.Wait()
+			clientHeader := protocol.ClientMessageHeader{
+				Length:    uint16(messageDataLen),
+				MessageID: uint16(serverHeader.Type),
+				ServerID:  0,
+			}
+			if err := binary.Write(sess.ClientConn, binary.LittleEndian, clientHeader.Length); err != nil {
+				if pooledBuf != nil {
+					buffer.Put(pooledBuf)
+				}
+				return
+			}
+			if err := binary.Write(sess.ClientConn, binary.LittleEndian, clientHeader.MessageID); err != nil {
+				if pooledBuf != nil {
+					buffer.Put(pooledBuf)
+				}
+				return
+			}
+			if err := binary.Write(sess.ClientConn, binary.LittleEndian, clientHeader.ServerID); err != nil {
+				if pooledBuf != nil {
+					buffer.Put(pooledBuf)
+				}
+				return
+			}
+			if len(messageData) > 0 {
+				if _, err := sess.ClientConn.Write(messageData); err != nil {
+					if pooledBuf != nil {
+						buffer.Put(pooledBuf)
+					}
+					return
+				}
+			}
+
+			if pooledBuf != nil {
+				buffer.Put(pooledBuf)
+			}
+
+			sess.LastActiveAt = time.Now()
+			metrics.MessagesProcessed.WithLabelValues("backend_to_client", sess.ServiceType).Inc()
+		}
+	}
 }
 
 // generateSessionID generates a unique session ID
