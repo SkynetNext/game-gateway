@@ -72,6 +72,19 @@ type Gateway struct {
 	wg       sync.WaitGroup
 }
 
+// connectionStats holds connection-level statistics
+// Shared between handleConnection and sub-handlers for unified logging
+type connectionStats struct {
+	sessionID   int64
+	backendAddr string
+	serverType  int
+	worldID     int
+	bytesIn     int64
+	bytesOut    int64
+	status      string
+	errorMsg    string
+}
+
 // New creates a new gateway instance
 func New(cfg *config.Config, podName string) (*Gateway, error) {
 	// Initialize components
@@ -355,6 +368,7 @@ func (g *Gateway) acceptLoop(ctx context.Context) {
 }
 
 // handleConnection handles a client connection
+// Following Envoy/Kong best practice: only 1 access log per connection
 func (g *Gateway) handleConnection(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 
@@ -368,14 +382,43 @@ func (g *Gateway) handleConnection(ctx context.Context, conn net.Conn) {
 	// Create context logger for this connection (caches trace context)
 	log := logger.NewContextLogger(ctx)
 
+	// Connection-level statistics (shared with sub-handlers)
+	connStats := &connectionStats{
+		sessionID:   0,
+		backendAddr: "",
+		serverType:  0,
+		worldID:     0,
+		bytesIn:     0,
+		bytesOut:    0,
+		status:      "closed", // Default status
+		errorMsg:    "",
+	}
+
+	// Single access log per connection (at connection close)
+	// Best practice from Envoy/Kong: log complete connection lifecycle
+	defer func() {
+		middleware.LogAccess(ctx, &middleware.AccessLogEntry{
+			SessionID:   connStats.sessionID,
+			ClientAddr:  remoteAddr,
+			BackendAddr: connStats.backendAddr,
+			ServerType:  connStats.serverType,
+			WorldID:     connStats.worldID,
+			DurationNs:  time.Since(startTime).Nanoseconds(),
+			BytesIn:     connStats.bytesIn,
+			BytesOut:    connStats.bytesOut,
+			Status:      connStats.status,
+			Error:       connStats.errorMsg,
+		})
+	}()
+
 	// Extract IP address from remote address
 	ip := extractIP(remoteAddr)
 
 	// IP-based rate limiting: check if connection from this IP is allowed
 	if !g.ipLimiter.Allow(ip) {
 		metrics.RateLimitRejected.Inc()
-		// SINGLE log entry for rate limit rejection
-		middleware.LogConnectionRejected(ctx, remoteAddr, "IP rate limit exceeded")
+		connStats.status = "rejected"
+		connStats.errorMsg = "IP rate limit exceeded"
 		return
 	}
 	defer g.ipLimiter.Release(ip)
@@ -383,8 +426,8 @@ func (g *Gateway) handleConnection(ctx context.Context, conn net.Conn) {
 	// Global rate limiting: check if connection is allowed
 	if !g.rateLimiter.Allow() {
 		metrics.RateLimitRejected.Inc()
-		// SINGLE log entry for rate limit rejection
-		middleware.LogConnectionRejected(ctx, remoteAddr, "connection rate limit exceeded")
+		connStats.status = "rejected"
+		connStats.errorMsg = "connection rate limit exceeded"
 		return
 	}
 	defer g.rateLimiter.Release()
@@ -399,50 +442,39 @@ func (g *Gateway) handleConnection(ctx context.Context, conn net.Conn) {
 	// Sniff protocol
 	protoType, _, err := sniffConn.Sniff()
 	if err != nil {
-		// SINGLE log entry for sniff error
-		middleware.LogAccess(ctx, &middleware.AccessLogEntry{
-			ClientAddr: remoteAddr,
-			DurationNs: time.Since(startTime).Nanoseconds(),
-			Status:     "error",
-			Error:      "protocol sniff failed: " + err.Error(),
-		})
+		connStats.status = "error"
+		connStats.errorMsg = "protocol sniff failed: " + err.Error()
 		return
 	}
 
 	// Handle based on protocol type
 	switch protoType {
 	case protocol.ProtocolWebSocket:
-		g.handleWebSocketConnection(ctx, sniffConn, nil, log)
+		g.handleWebSocketConnection(ctx, sniffConn, nil, log, connStats)
 	case protocol.ProtocolHTTP:
-		g.handleHTTPConnection(ctx, sniffConn, log)
+		g.handleHTTPConnection(ctx, sniffConn, log, connStats)
 	case protocol.ProtocolTCP:
-		g.handleTCPConnection(ctx, sniffConn, log)
+		g.handleTCPConnection(ctx, sniffConn, log, connStats)
 	default:
-		// SINGLE log entry for unknown protocol
-		middleware.LogConnectionRejected(ctx, remoteAddr, "unknown protocol")
+		connStats.status = "rejected"
+		connStats.errorMsg = "unknown protocol"
 		return
 	}
 }
 
-func (g *Gateway) handleHTTPConnection(ctx context.Context, conn *protocol.SniffConn, log *logger.ContextLogger) {
-	startTime := time.Now()
-	remoteAddr := conn.RemoteAddr().String()
+func (g *Gateway) handleHTTPConnection(ctx context.Context, conn *protocol.SniffConn, log *logger.ContextLogger, connStats *connectionStats) {
 
 	req, err := http.ReadRequest(conn.Reader())
 	if err != nil {
 		_ = writeHTTPResponse(conn.Conn, http.StatusBadRequest, "text/plain; charset=utf-8", []byte("Malformed HTTP request\n"), nil)
-		middleware.LogAccess(ctx, &middleware.AccessLogEntry{
-			ClientAddr: remoteAddr,
-			DurationNs: time.Since(startTime).Nanoseconds(),
-			Status:     "rejected",
-			Error:      "malformed http request",
-		})
+		connStats.status = "rejected"
+		connStats.errorMsg = "malformed http request"
 		return
 	}
 	defer req.Body.Close()
 
 	if isWebSocketUpgrade(req) {
-		g.handleWebSocketConnection(ctx, conn, req, log)
+		g.handleWebSocketConnection(ctx, conn, req, log, connStats)
 		return
 	}
 
@@ -450,16 +482,11 @@ func (g *Gateway) handleHTTPConnection(ctx context.Context, conn *protocol.Sniff
 	_ = writeHTTPResponse(conn.Conn, http.StatusUpgradeRequired, "text/plain; charset=utf-8", body, map[string]string{
 		"Connection": "close",
 	})
-	middleware.LogAccess(ctx, &middleware.AccessLogEntry{
-		ClientAddr: remoteAddr,
-		DurationNs: time.Since(startTime).Nanoseconds(),
-		Status:     "rejected",
-		Error:      "unsupported protocol (http)",
-	})
+	connStats.status = "rejected"
+	connStats.errorMsg = "unsupported protocol (http)"
 }
 
-func (g *Gateway) handleWebSocketConnection(ctx context.Context, conn *protocol.SniffConn, req *http.Request, log *logger.ContextLogger) {
-	startTime := time.Now()
+func (g *Gateway) handleWebSocketConnection(ctx context.Context, conn *protocol.SniffConn, req *http.Request, log *logger.ContextLogger, connStats *connectionStats) {
 	remoteAddr := conn.RemoteAddr().String()
 
 	var err error
@@ -467,12 +494,8 @@ func (g *Gateway) handleWebSocketConnection(ctx context.Context, conn *protocol.
 		req, err = http.ReadRequest(conn.Reader())
 		if err != nil {
 			_ = writeHTTPResponse(conn.Conn, http.StatusBadRequest, "text/plain; charset=utf-8", []byte("Malformed WebSocket handshake\n"), nil)
-			middleware.LogAccess(ctx, &middleware.AccessLogEntry{
-				ClientAddr: remoteAddr,
-				DurationNs: time.Since(startTime).Nanoseconds(),
-				Status:     "rejected",
-				Error:      "malformed websocket handshake",
-			})
+			connStats.status = "rejected"
+			connStats.errorMsg = "malformed websocket handshake"
 			return
 		}
 	}
@@ -480,24 +503,16 @@ func (g *Gateway) handleWebSocketConnection(ctx context.Context, conn *protocol.
 
 	if !isWebSocketRequest(req) {
 		_ = writeHTTPResponse(conn.Conn, http.StatusBadRequest, "text/plain; charset=utf-8", []byte("Invalid WebSocket upgrade request\n"), nil)
-		middleware.LogAccess(ctx, &middleware.AccessLogEntry{
-			ClientAddr: remoteAddr,
-			DurationNs: time.Since(startTime).Nanoseconds(),
-			Status:     "rejected",
-			Error:      "invalid websocket upgrade",
-		})
+		connStats.status = "rejected"
+		connStats.errorMsg = "invalid websocket upgrade"
 		return
 	}
 
 	acceptKey, err := computeWebSocketAcceptKey(req.Header.Get("Sec-WebSocket-Key"))
 	if err != nil {
 		_ = writeHTTPResponse(conn.Conn, http.StatusBadRequest, "text/plain; charset=utf-8", []byte("Invalid WebSocket key\n"), nil)
-		middleware.LogAccess(ctx, &middleware.AccessLogEntry{
-			ClientAddr: remoteAddr,
-			DurationNs: time.Since(startTime).Nanoseconds(),
-			Status:     "rejected",
-			Error:      "invalid websocket key",
-		})
+		connStats.status = "rejected"
+		connStats.errorMsg = "invalid websocket key"
 		return
 	}
 
@@ -507,6 +522,8 @@ func (g *Gateway) handleWebSocketConnection(ctx context.Context, conn *protocol.
 			zap.String("remote_addr", remoteAddr),
 			zap.Error(err),
 		)
+		connStats.status = "error"
+		connStats.errorMsg = "handshake write failed"
 		return
 	}
 
@@ -520,7 +537,7 @@ func (g *Gateway) handleWebSocketConnection(ctx context.Context, conn *protocol.
 	wsConn := protocol.NewWebSocketConn(conn.Conn, conn.Reader(), maxMessageSize)
 
 	// Bridge to TCP handler
-	g.handleTCPConnection(ctx, wsConn, log)
+	g.handleTCPConnection(ctx, wsConn, log, connStats)
 }
 
 func isWebSocketUpgrade(req *http.Request) bool {
@@ -625,7 +642,7 @@ func headerContainsToken(h http.Header, key, token string) bool {
 }
 
 // handleTCPConnection handles TCP connection (game protocol)
-func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *logger.ContextLogger) {
+func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *logger.ContextLogger, connStats *connectionStats) {
 	startTime := time.Now()
 	remoteAddr := conn.RemoteAddr().String()
 
@@ -645,19 +662,11 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 	if err != nil {
 		if err == protocol.ErrMessageTooLarge {
 			metrics.RoutingErrors.WithLabelValues("message_too_large").Inc()
-			middleware.LogAccess(ctx, &middleware.AccessLogEntry{
-				ClientAddr: remoteAddr,
-				DurationNs: time.Since(startTime).Nanoseconds(),
-				Status:     "rejected",
-				Error:      "message too large",
-			})
+			connStats.status = "rejected"
+			connStats.errorMsg = "message too large"
 		} else if err != io.EOF {
-			middleware.LogAccess(ctx, &middleware.AccessLogEntry{
-				ClientAddr: remoteAddr,
-				DurationNs: time.Since(startTime).Nanoseconds(),
-				Status:     "error",
-				Error:      err.Error(),
-			})
+			connStats.status = "error"
+			connStats.errorMsg = err.Error()
 		}
 		return
 	}
@@ -683,8 +692,10 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 	backendAddr, err := g.routeToBackend(ctx, int(serverType), int(worldID), int(instID))
 	if err != nil {
 		metrics.RoutingErrors.WithLabelValues("not_found").Inc()
-		// SINGLE log entry for routing error
-		middleware.LogRoutingError(ctx, remoteAddr, int(serverType), int(worldID), err, time.Since(startTime).Nanoseconds())
+		connStats.status = "error"
+		connStats.errorMsg = fmt.Sprintf("routing failed: %v", err)
+		connStats.serverType = int(serverType)
+		connStats.worldID = int(worldID)
 		return
 	}
 
@@ -692,8 +703,11 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 	breaker := g.getOrCreateBreaker(backendAddr)
 	if !breaker.Allow() {
 		metrics.RoutingErrors.WithLabelValues("circuit_breaker_open").Inc()
-		// SINGLE log entry for circuit breaker
-		middleware.LogCircuitBreakerOpen(ctx, remoteAddr, backendAddr, int(serverType), int(worldID), time.Since(startTime).Nanoseconds())
+		connStats.status = "error"
+		connStats.errorMsg = "circuit breaker open"
+		connStats.backendAddr = backendAddr
+		connStats.serverType = int(serverType)
+		connStats.worldID = int(worldID)
 		return
 	}
 
@@ -717,7 +731,12 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 		})
 		if err != nil {
 			metrics.RoutingErrors.WithLabelValues("connection_failed").Inc()
-			middleware.LogBackendError(ctx, sessionID, remoteAddr, backendAddr, int(serverType), int(worldID), err, time.Since(startTime).Nanoseconds())
+			connStats.status = "error"
+			connStats.errorMsg = fmt.Sprintf("backend connection failed: %v", err)
+			connStats.sessionID = sessionID
+			connStats.backendAddr = backendAddr
+			connStats.serverType = int(serverType)
+			connStats.worldID = int(worldID)
 			return
 		}
 	}
@@ -758,12 +777,22 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 			Payload:   messageData,
 		}
 		if err := g.grpcManager.Send(ctx, backendAddr, packet); err != nil {
-			middleware.LogBackendError(ctx, sessionID, remoteAddr, backendAddr, int(serverType), int(worldID), err, time.Since(startTime).Nanoseconds())
+			connStats.status = "error"
+			connStats.errorMsg = fmt.Sprintf("grpc send failed: %v", err)
+			connStats.sessionID = sessionID
+			connStats.backendAddr = backendAddr
+			connStats.serverType = int(serverType)
+			connStats.worldID = int(worldID)
 			return
 		}
 	} else {
 		if err := protocol.WriteServerMessage(backendConn.Conn(), int32(clientHeader.MessageID), sessionID, messageData, traceContext); err != nil {
-			middleware.LogBackendError(ctx, sessionID, remoteAddr, backendAddr, int(serverType), int(worldID), err, time.Since(startTime).Nanoseconds())
+			connStats.status = "error"
+			connStats.errorMsg = fmt.Sprintf("write message failed: %v", err)
+			connStats.sessionID = sessionID
+			connStats.backendAddr = backendAddr
+			connStats.serverType = int(serverType)
+			connStats.worldID = int(worldID)
 			return
 		}
 	}
@@ -788,17 +817,16 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 	g.sessionManager.Add(sess)
 	metrics.ActiveSessions.Inc()
 
-	// SINGLE log entry for session establishment (access log only)
-	middleware.LogSessionEstablished(ctx, sessionID, remoteAddr, backendAddr, int(serverType), int(worldID), latency.Nanoseconds())
-
-	// Track bytes for session closure log
-	var bytesIn, bytesOut int64
+	// Update connection statistics for unified access log
+	connStats.sessionID = sessionID
+	connStats.backendAddr = backendAddr
+	connStats.serverType = int(serverType)
+	connStats.worldID = int(worldID)
+	connStats.status = "success"
 
 	defer func() {
 		g.sessionManager.Remove(sessionID)
 		metrics.ActiveSessions.Dec()
-		// SINGLE log entry for session closure (access log only)
-		middleware.LogSessionClosed(ctx, sessionID, remoteAddr, backendAddr, int(serverType), int(worldID), time.Since(startTime).Nanoseconds(), bytesIn, bytesOut)
 	}()
 
 	// Forward subsequent data bidirectionally
@@ -807,9 +835,9 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 		if !ok {
 			sniffConn = protocol.NewSniffConn(conn)
 		}
-		g.forwardGrpcConnection(ctx, sessionID, sniffConn, backendAddr, log, &bytesIn, &bytesOut)
+		g.forwardGrpcConnection(ctx, sessionID, sniffConn, backendAddr, log, &connStats.bytesIn, &connStats.bytesOut)
 	} else {
-		g.forwardConnection(ctx, sess, log, &bytesIn, &bytesOut)
+		g.forwardConnection(ctx, sess, log, &connStats.bytesIn, &connStats.bytesOut)
 	}
 }
 
