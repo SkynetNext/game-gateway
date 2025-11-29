@@ -461,7 +461,7 @@ func (g *Gateway) handleConnection(ctx context.Context, conn net.Conn) {
 		return
 	}
 
-	// Log detected protocol for debugging
+	// Log detected protocol (Info level so it's visible with default log level)
 	var protoName string
 	switch protoType {
 	case protocol.ProtocolWebSocket:
@@ -473,7 +473,7 @@ func (g *Gateway) handleConnection(ctx context.Context, conn net.Conn) {
 	default:
 		protoName = "unknown"
 	}
-	log.Debug("protocol detected",
+	log.Info("protocol detected",
 		zap.String("protocol", protoName),
 		zap.String("remote_addr", remoteAddr),
 		zap.Int("peeked_bytes", len(peekedData)),

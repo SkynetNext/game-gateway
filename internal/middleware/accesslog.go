@@ -3,7 +3,6 @@ package middleware
 import (
 	"context"
 	"sync"
-	"time"
 
 	"github.com/SkynetNext/game-gateway/internal/logger"
 	"go.opentelemetry.io/otel/trace"
@@ -80,11 +79,6 @@ func LogAccess(ctx context.Context, entry *AccessLogEntry) {
 		return
 	}
 
-	// Set timestamp if not already set
-	if entry.Timestamp == 0 {
-		entry.Timestamp = time.Now().UnixNano()
-	}
-
 	// Extract trace context
 	span := trace.SpanFromContext(ctx)
 	if span.SpanContext().IsValid() {
@@ -96,8 +90,8 @@ func LogAccess(ctx context.Context, entry *AccessLogEntry) {
 	fields := make([]zap.Field, 0, 16)
 
 	// Always include these
+	// Note: timestamp is automatically added by Zap logger (from logger config)
 	fields = append(fields,
-		zap.Int64("timestamp", entry.Timestamp),
 		zap.String("client.address", entry.ClientAddr),
 		zap.String("status", entry.Status),
 	)
