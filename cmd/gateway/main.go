@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/SkynetNext/game-gateway/internal/config"
 	"github.com/SkynetNext/game-gateway/internal/gateway"
@@ -108,9 +109,17 @@ func main() {
 		logger.Error("Error during gateway shutdown", zap.Error(err))
 	}
 
-	// Shutdown tracing
-	if err := tracing.Shutdown(shutdownCtx); err != nil {
-		logger.Warn("Error during tracing shutdown", zap.Error(err))
+	// Shutdown tracing with separate, shorter timeout
+	// Tracing shutdown should be fast (just flush pending spans), so use a shorter timeout
+	tracingShutdownCtx, tracingShutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer tracingShutdownCancel()
+	if err := tracing.Shutdown(tracingShutdownCtx); err != nil {
+		// Only warn if it's not a context deadline (which is expected if tracing is slow)
+		if err != context.DeadlineExceeded {
+			logger.Warn("Error during tracing shutdown", zap.Error(err))
+		} else {
+			logger.Debug("Tracing shutdown timed out (non-critical)", zap.Error(err))
+		}
 	}
 
 	logger.Info("Game Gateway closed")
