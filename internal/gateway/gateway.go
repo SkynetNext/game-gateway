@@ -198,7 +198,6 @@ func (g *Gateway) Start(ctx context.Context) error {
 	if err := g.startListener(g.ctx); err != nil {
 		return fmt.Errorf("failed to start listener: %w", err)
 	}
-	logger.Info("gateway listener started", zap.String("address", g.config.Server.ListenAddr))
 
 	return nil
 }
@@ -336,7 +335,8 @@ func (g *Gateway) startListener(ctx context.Context) error {
 		g.acceptLoop(ctx)
 	}()
 
-	logger.Info("listener accepting connections", zap.String("address", g.config.Server.ListenAddr))
+	logger.Info("gateway listener started", zap.String("address", g.config.Server.ListenAddr))
+
 	return nil
 }
 
@@ -469,30 +469,12 @@ func (g *Gateway) handleConnection(ctx context.Context, conn net.Conn) {
 	sniffConn := protocol.NewSniffConn(conn)
 
 	// Sniff protocol
-	protoType, peekedData, err := sniffConn.Sniff()
+	protoType, _, err := sniffConn.Sniff()
 	if err != nil {
 		connStats.status = "error"
 		connStats.errorMsg = "protocol sniff failed: " + err.Error()
 		return
 	}
-
-	// Log detected protocol (Info level so it's visible with default log level)
-	var protoName string
-	switch protoType {
-	case protocol.ProtocolWebSocket:
-		protoName = "websocket"
-	case protocol.ProtocolHTTP:
-		protoName = "http"
-	case protocol.ProtocolTCP:
-		protoName = "tcp"
-	default:
-		protoName = "unknown"
-	}
-	log.Info("protocol detected",
-		zap.String("protocol", protoName),
-		zap.String("remote_addr", remoteAddr),
-		zap.Int("peeked_bytes", len(peekedData)),
-	)
 
 	// Handle based on protocol type
 	switch protoType {
