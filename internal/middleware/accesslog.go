@@ -71,7 +71,12 @@ func InitAccessLogger(enabled bool) {
 // LogAccess records an access log entry
 // This is a single, unified logging point - no duplicate logs
 func LogAccess(ctx context.Context, entry *AccessLogEntry) {
-	if globalAccessLogger == nil || !globalAccessLogger.enabled {
+	if globalAccessLogger == nil {
+		logger.Warn("LogAccess called but globalAccessLogger is nil")
+		return
+	}
+	if !globalAccessLogger.enabled {
+		logger.Debug("LogAccess called but access logger is disabled")
 		return
 	}
 
