@@ -43,9 +43,12 @@ func (g *Gateway) sendToSession(sessionID int64, packet *gateway.GamePacket) {
 		g.configMu.RUnlock()
 
 		sess.ClientConn.SetWriteDeadline(time.Now().Add(writeTimeout))
-		_, err := sess.ClientConn.Write(packet.Payload)
+		n, err := sess.ClientConn.Write(packet.Payload)
 		if err != nil {
 			logger.Debug("failed to write to client session", zap.Int64("session_id", sessionID), zap.Error(err))
+		} else if sess.BytesOut != nil {
+			// Update bytesOut counter (for access log statistics)
+			atomic.AddInt64(sess.BytesOut, int64(n))
 		}
 	}
 }

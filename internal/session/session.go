@@ -40,6 +40,10 @@ type Session struct {
 
 	// State is the session state
 	State SessionState
+
+	// BytesOut is a pointer to the bytes sent to client (for gRPC mode)
+	// This allows sendToSession to update the counter
+	BytesOut *int64
 }
 
 // SessionState represents session state

@@ -847,6 +847,7 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 		CreatedAt:    time.Now(),
 		LastActiveAt: time.Now(),
 		State:        session.SessionStateConnected,
+		BytesOut:     &connStats.bytesOut, // For gRPC mode: allow sendToSession to update bytesOut
 	}
 	if backendConn != nil {
 		sess.BackendConn = backendConn.Conn()
