@@ -41,13 +41,15 @@ func main() {
 	}
 
 	// Initialize logger with service info (OTel Resource attributes)
+	// Application-layer attributes: service.name, service.namespace, service.version
+	// Infrastructure-layer attributes (service.instance.id) are added by Fluent Bit
 	if err := logger.Init(logger.Config{
 		Level: logLevel,
 		ServiceInfo: logger.ServiceInfo{
-			Name:       "game-gateway",
-			Namespace:  os.Getenv("POD_NAMESPACE"),
-			InstanceID: podName,
-			Version:    version,
+			Name:      "game-gateway",  // Application defines its name
+			Namespace: "hgame-gateway", // Business namespace (not K8s namespace)
+			Version:   version,         // Build-time version
+			// InstanceID is added by Fluent Bit from Pod name
 		},
 	}); err != nil {
 		log.Fatalf("Failed to initialize logger: %v", err)

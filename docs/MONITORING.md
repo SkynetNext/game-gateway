@@ -28,29 +28,81 @@ Game Gateway provides comprehensive observability through structured logging, Pr
          ┌────────────────────┼────────────────────┐
          ▼                    ▼                    ▼
 ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
-│    Promtail     │  │  OTel Collector │  │   Prometheus    │
+│   Fluent Bit    │  │  OTel Collector │  │   Prometheus    │
 │  (DaemonSet)    │  │                 │  │                 │
 └────────┬────────┘  └────────┬────────┘  └────────┬────────┘
          │                    │                    │
-         ▼                    ▼                    ▼
-┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
-│      Loki       │  │      Tempo      │  │   Prometheus    │
-│     (Logs)      │  │    (Traces)     │  │    (Metrics)    │
-└────────┬────────┘  └────────┬────────┘  └────────┬────────┘
-         │                    │                    │
-         └────────────────────┼────────────────────┘
-                              ▼
-                      ┌─────────────────┐
-                      │     Grafana     │
-                      │ (Unified View)  │
-                      └─────────────────┘
+         ├─────┬──────┬───────┤                    │
+         │     │      │       ▼                    ▼
+         │     │      │  ┌─────────────────┐  ┌─────────────────┐
+         │     │      │  │      Tempo      │  │   Prometheus    │
+         │     │      │  │    (Traces)     │  │    (Metrics)    │
+         │     │      │  └────────┬────────┘  └────────┬────────┘
+         ▼     ▼      ▼           │                    │
+    ┌────────┐ ┌────┐ ┌────┐     │                    │
+    │  Loki  │ │ ES │ │ S3 │     │                    │
+    │ (实时) │ │(分析)│ │(归档)│     │                    │
+    └────┬───┘ └─┬──┘ └────┘     │                    │
+         │       │                │                    │
+         └───────┴────────────────┼────────────────────┘
+                                  ▼
+                          ┌─────────────────┐
+                          │     Grafana     │
+                          │ (Unified View)  │
+                          └─────────────────┘
 ```
 
 ### Data Flow
 
-1. **Logs**: Application → stdout (JSON) → Promtail (DaemonSet) → Loki → Grafana
+1. **Logs**: Application → stdout (JSON) → Fluent Bit (DaemonSet) → Loki/ES/S3 → Grafana
 2. **Traces**: Application → OTLP → OTel Collector → Tempo → Grafana
 3. **Metrics**: Application → Prometheus (scrape) → Grafana
+
+### Latency Breakdown
+
+#### Log Pipeline Latency
+
+| Stage | Component | Typical Latency | Notes |
+|-------|-----------|----------------|-------|
+| **1. Application → stdout** | Zap Logger | **< 1ms** | In-memory write, negligible |
+| **2. stdout → Container Log** | Docker/containerd | **0-5ms** | Buffered write, usually instant |
+| **3. Container Log → Fluent Bit** | Fluent Bit Tail Input | **5-10s** | `Refresh_Interval=10s` (configurable) |
+| **4. Fluent Bit Processing** | Filters & Parsers | **1-5ms** | Kubernetes metadata enrichment |
+| **5. Fluent Bit → Loki** | Network + Write | **10-50ms** | Batch flush every 10s, network RTT |
+| **5. Fluent Bit → Elasticsearch** | Network + Bulk Index | **50-200ms** | Bulk API, depends on ES load |
+| **6. Loki/ES → Query** | Grafana/Kibana | **100-500ms** | Query execution time |
+
+**Total End-to-End Latency:**
+- **Loki**: ~10-15 seconds (near real-time)
+- **Elasticsearch**: ~10-15 seconds (near real-time)
+- **Query Time**: Additional 100-500ms when searching
+
+**Optimization Tips:**
+- Reduce `Refresh_Interval` in Fluent Bit (trade-off: more CPU)
+- Reduce `Flush` interval (trade-off: more network calls)
+- Use `Read_from_Head=False` to avoid processing old logs
+- Increase ES bulk size for better throughput
+
+#### Trace Pipeline Latency
+
+| Stage | Component | Typical Latency |
+|-------|-----------|----------------|
+| **1. Application → OTLP** | OTel SDK | **< 1ms** |
+| **2. OTLP → Collector** | Network | **1-5ms** |
+| **3. Collector → Tempo** | Network + Write | **10-50ms** |
+| **4. Tempo → Query** | Grafana | **100-300ms** |
+
+**Total Trace Latency**: ~110-350ms (much faster than logs)
+
+#### Metrics Pipeline Latency
+
+| Stage | Component | Typical Latency |
+|-------|-----------|----------------|
+| **1. Application → Metrics** | Prometheus Client | **< 1ms** |
+| **2. Prometheus Scrape** | Polling Interval | **15-30s** (configurable) |
+| **3. Prometheus → Query** | Grafana | **50-200ms** |
+
+**Total Metrics Latency**: ~15-30 seconds (polling-based)
 
 ### Correlation
 
@@ -58,6 +110,26 @@ Game Gateway provides comprehensive observability through structured logging, Pr
 - **Traces ↔ Logs**: Grafana Tempo configured with "Trace to Logs" feature
 - **Traces ↔ Metrics**: Tempo configured with "Trace to Metrics" feature
 - **All data**: Unified by `service.name`, `service.namespace`, `service.instance.id`
+
+### Log Collection: Fluent Bit
+
+**Why Fluent Bit?**
+
+Fluent Bit is chosen over Promtail for enterprise-grade log collection:
+
+- **Multi-destination**: Simultaneously ship logs to Loki (real-time), Elasticsearch (analysis), and S3 (archive)
+- **Performance**: Written in C, minimal resource footprint (~450KB memory)
+- **CNCF Graduated**: Industry-standard with broad enterprise adoption
+- **Rich Processing**: Built-in parsers, filters, and data enrichment
+- **ELK Compatible**: Seamless integration with existing Elasticsearch infrastructure
+
+**Key Features:**
+
+- **Real-time**: Loki for fast querying and troubleshooting
+- **Analysis**: Elasticsearch for complex queries and long-term analysis
+- **Archive**: S3 for compliance and cost-effective long-term storage
+- **Filtering**: Pre-process and enrich logs before shipping
+- **Buffering**: Reliable delivery with disk-based buffering
 
 ## Prometheus Metrics
 

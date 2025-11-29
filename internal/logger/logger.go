@@ -116,14 +116,15 @@ func Init(cfg Config) error {
 		)
 
 		// Build logger with default fields (OTel Resource attributes)
+		// Application-level attributes (should be set by application)
 		L = zap.New(core, zap.AddCaller(), zap.AddStacktrace(zapcore.ErrorLevel)).With(
-			// OpenTelemetry Resource Semantic Conventions
-			zap.String("service.name", serviceInfo.Name),
-			zap.String("service.namespace", serviceInfo.Namespace),
-			zap.String("service.instance.id", serviceInfo.InstanceID),
+			// OpenTelemetry Resource Semantic Conventions - Application Layer
+			zap.String("service.name", serviceInfo.Name),           // Application defines its name
+			zap.String("service.namespace", serviceInfo.Namespace), // Business namespace
+			// Note: service.instance.id is added by Fluent Bit (infrastructure layer)
 		)
 
-		// Add version if available
+		// Add version if available (build-time information)
 		if serviceInfo.Version != "" {
 			L = L.With(zap.String("service.version", serviceInfo.Version))
 		}
