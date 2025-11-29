@@ -37,7 +37,10 @@ func (s *SniffConn) Sniff() (ProtocolType, []byte, error) {
 		bytes.HasPrefix(peeked, []byte("HTTP")) {
 		// Peek a bit more to inspect headers (best-effort)
 		more, _ := s.br.Peek(512)
-		if bytes.Contains(bytes.ToLower(more), []byte("upgrade: websocket")) {
+		lowerMore := bytes.ToLower(more)
+		// Check for WebSocket upgrade: look for both "upgrade" and "websocket" keywords
+		// This is more robust than exact string matching
+		if bytes.Contains(lowerMore, []byte("upgrade")) && bytes.Contains(lowerMore, []byte("websocket")) {
 			return ProtocolWebSocket, more, nil
 		}
 		return ProtocolHTTP, more, nil

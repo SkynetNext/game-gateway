@@ -454,12 +454,30 @@ func (g *Gateway) handleConnection(ctx context.Context, conn net.Conn) {
 	sniffConn := protocol.NewSniffConn(conn)
 
 	// Sniff protocol
-	protoType, _, err := sniffConn.Sniff()
+	protoType, peekedData, err := sniffConn.Sniff()
 	if err != nil {
 		connStats.status = "error"
 		connStats.errorMsg = "protocol sniff failed: " + err.Error()
 		return
 	}
+
+	// Log detected protocol for debugging
+	var protoName string
+	switch protoType {
+	case protocol.ProtocolWebSocket:
+		protoName = "websocket"
+	case protocol.ProtocolHTTP:
+		protoName = "http"
+	case protocol.ProtocolTCP:
+		protoName = "tcp"
+	default:
+		protoName = "unknown"
+	}
+	log.Debug("protocol detected",
+		zap.String("protocol", protoName),
+		zap.String("remote_addr", remoteAddr),
+		zap.Int("peeked_bytes", len(peekedData)),
+	)
 
 	// Handle based on protocol type
 	switch protoType {
@@ -674,11 +692,17 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 
 	clientHeader, messageData, err := protocol.ReadFullPacket(conn, maxMessageSize)
 	if err != nil {
-		if err == protocol.ErrMessageTooLarge {
+		switch err {
+		case protocol.ErrMessageTooLarge:
 			metrics.RoutingErrors.WithLabelValues("message_too_large").Inc()
 			connStats.status = "rejected"
 			connStats.errorMsg = "message too large"
-		} else if err != io.EOF {
+		case io.EOF:
+			// Connection closed before first packet received
+			// This is normal for idle connections or clients that close immediately
+			connStats.status = "closed"
+			connStats.errorMsg = "connection closed before first packet"
+		default:
 			connStats.status = "error"
 			connStats.errorMsg = err.Error()
 		}
