@@ -19,7 +19,9 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	GameGatewayService_StreamPackets_FullMethodName = "/gateway.GameGatewayService/StreamPackets"
+	GameGatewayService_StreamPackets_FullMethodName    = "/gateway.GameGatewayService/StreamPackets"
+	GameGatewayService_NotifyConnect_FullMethodName    = "/gateway.GameGatewayService/NotifyConnect"
+	GameGatewayService_NotifyDisconnect_FullMethodName = "/gateway.GameGatewayService/NotifyDisconnect"
 )
 
 // GameGatewayServiceClient is the client API for GameGatewayService service.
@@ -30,6 +32,12 @@ const (
 type GameGatewayServiceClient interface {
 	// StreamPackets 建立一个双向流，用于在 Gateway 和 GameServer 之间转发数据包
 	StreamPackets(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[GamePacket, GamePacket], error)
+	// NotifyConnect 当客户端连接到 Gateway 时通知 GameServer
+	// Gateway 会在客户端建立连接后立即调用此方法，携带连接元数据
+	NotifyConnect(ctx context.Context, in *ConnectRequest, opts ...grpc.CallOption) (*ConnectResponse, error)
+	// NotifyDisconnect 当客户端从 Gateway 断开时通知 GameServer
+	// Gateway 会在客户端断开连接后调用此方法，以便 GameServer 清理资源
+	NotifyDisconnect(ctx context.Context, in *DisconnectRequest, opts ...grpc.CallOption) (*DisconnectResponse, error)
 }
 
 type gameGatewayServiceClient struct {
@@ -53,6 +61,26 @@ func (c *gameGatewayServiceClient) StreamPackets(ctx context.Context, opts ...gr
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type GameGatewayService_StreamPacketsClient = grpc.BidiStreamingClient[GamePacket, GamePacket]
 
+func (c *gameGatewayServiceClient) NotifyConnect(ctx context.Context, in *ConnectRequest, opts ...grpc.CallOption) (*ConnectResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ConnectResponse)
+	err := c.cc.Invoke(ctx, GameGatewayService_NotifyConnect_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gameGatewayServiceClient) NotifyDisconnect(ctx context.Context, in *DisconnectRequest, opts ...grpc.CallOption) (*DisconnectResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DisconnectResponse)
+	err := c.cc.Invoke(ctx, GameGatewayService_NotifyDisconnect_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // GameGatewayServiceServer is the server API for GameGatewayService service.
 // All implementations must embed UnimplementedGameGatewayServiceServer
 // for forward compatibility.
@@ -61,6 +89,12 @@ type GameGatewayService_StreamPacketsClient = grpc.BidiStreamingClient[GamePacke
 type GameGatewayServiceServer interface {
 	// StreamPackets 建立一个双向流，用于在 Gateway 和 GameServer 之间转发数据包
 	StreamPackets(grpc.BidiStreamingServer[GamePacket, GamePacket]) error
+	// NotifyConnect 当客户端连接到 Gateway 时通知 GameServer
+	// Gateway 会在客户端建立连接后立即调用此方法，携带连接元数据
+	NotifyConnect(context.Context, *ConnectRequest) (*ConnectResponse, error)
+	// NotifyDisconnect 当客户端从 Gateway 断开时通知 GameServer
+	// Gateway 会在客户端断开连接后调用此方法，以便 GameServer 清理资源
+	NotifyDisconnect(context.Context, *DisconnectRequest) (*DisconnectResponse, error)
 	mustEmbedUnimplementedGameGatewayServiceServer()
 }
 
@@ -73,6 +107,12 @@ type UnimplementedGameGatewayServiceServer struct{}
 
 func (UnimplementedGameGatewayServiceServer) StreamPackets(grpc.BidiStreamingServer[GamePacket, GamePacket]) error {
 	return status.Error(codes.Unimplemented, "method StreamPackets not implemented")
+}
+func (UnimplementedGameGatewayServiceServer) NotifyConnect(context.Context, *ConnectRequest) (*ConnectResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method NotifyConnect not implemented")
+}
+func (UnimplementedGameGatewayServiceServer) NotifyDisconnect(context.Context, *DisconnectRequest) (*DisconnectResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method NotifyDisconnect not implemented")
 }
 func (UnimplementedGameGatewayServiceServer) mustEmbedUnimplementedGameGatewayServiceServer() {}
 func (UnimplementedGameGatewayServiceServer) testEmbeddedByValue()                            {}
@@ -102,13 +142,58 @@ func _GameGatewayService_StreamPackets_Handler(srv interface{}, stream grpc.Serv
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type GameGatewayService_StreamPacketsServer = grpc.BidiStreamingServer[GamePacket, GamePacket]
 
+func _GameGatewayService_NotifyConnect_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ConnectRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GameGatewayServiceServer).NotifyConnect(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GameGatewayService_NotifyConnect_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GameGatewayServiceServer).NotifyConnect(ctx, req.(*ConnectRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _GameGatewayService_NotifyDisconnect_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DisconnectRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GameGatewayServiceServer).NotifyDisconnect(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GameGatewayService_NotifyDisconnect_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GameGatewayServiceServer).NotifyDisconnect(ctx, req.(*DisconnectRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // GameGatewayService_ServiceDesc is the grpc.ServiceDesc for GameGatewayService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var GameGatewayService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "gateway.GameGatewayService",
 	HandlerType: (*GameGatewayServiceServer)(nil),
-	Methods:     []grpc.MethodDesc{},
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "NotifyConnect",
+			Handler:    _GameGatewayService_NotifyConnect_Handler,
+		},
+		{
+			MethodName: "NotifyDisconnect",
+			Handler:    _GameGatewayService_NotifyDisconnect_Handler,
+		},
+	},
 	Streams: []grpc.StreamDesc{
 		{
 			StreamName:    "StreamPackets",

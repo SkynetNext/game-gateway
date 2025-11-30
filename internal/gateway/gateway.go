@@ -808,8 +808,29 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 	routeSpan.SetStatus(codes.Ok, "routed")
 	routeSpan.End()
 
+	// 通知后端服务器客户端已连接（业界最佳实践）
+	clientIP := extractIP(remoteAddr)
+	if err := g.notifyBackendConnect(ctx, backendAddr, sessionID, clientIP, "tcp"); err != nil {
+		// 连接通知失败，拒绝此连接
+		connStats.status = "error"
+		connStats.errorMsg = fmt.Sprintf("notify connect failed: %v", err)
+		connStats.sessionID = sessionID
+		connStats.backendAddr = backendAddr
+		connStats.serverType = int(serverType)
+		connStats.worldID = int(worldID)
+		return
+	}
+
 	// Ensure connection is returned to pool even on panic
+	// 同时在连接结束时通知后端断开
 	defer func() {
+		// 通知后端服务器客户端已断开
+		disconnectReason := "normal"
+		if connStats.status == "error" {
+			disconnectReason = connStats.errorMsg
+		}
+		g.notifyBackendDisconnect(context.Background(), backendAddr, sessionID, disconnectReason)
+
 		if r := recover(); r != nil {
 			log.Error("panic in handleTCPConnection",
 				zap.Any("panic", r),

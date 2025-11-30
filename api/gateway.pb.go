@@ -30,16 +30,12 @@ type GamePacket struct {
 	MsgId int32 `protobuf:"varint,2,opt,name=msg_id,json=msgId,proto3" json:"msg_id,omitempty"`
 	// Payload 原始的消息体二进制数据 (透传，不进行二次序列化)
 	Payload []byte `protobuf:"bytes,3,opt,name=payload,proto3" json:"payload,omitempty"`
-	// Metadata 扩展字段，用于传递其他元数据
+	// Metadata 扩展字段，用于传递 TraceContext 等元数据
 	Metadata map[string]string `protobuf:"bytes,4,rep,name=metadata,proto3" json:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	// 用于广播，如果此字段有值，则忽略 session_id，消息会广播给列表中的所有 session
 	TargetSessionIds []int64 `protobuf:"varint,5,rep,packed,name=target_session_ids,json=targetSessionIds,proto3" json:"target_session_ids,omitempty"`
-	// Trace ID (OpenTelemetry 分布式追踪，32字符十六进制字符串)
-	TraceId string `protobuf:"bytes,6,opt,name=trace_id,json=traceId,proto3" json:"trace_id,omitempty"`
-	// Span ID (OpenTelemetry 分布式追踪，16字符十六进制字符串)
-	SpanId        string `protobuf:"bytes,7,opt,name=span_id,json=spanId,proto3" json:"span_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *GamePacket) Reset() {
@@ -107,25 +103,258 @@ func (x *GamePacket) GetTargetSessionIds() []int64 {
 	return nil
 }
 
-func (x *GamePacket) GetTraceId() string {
+// ConnectRequest 客户端连接请求（Gateway → GameServer）
+type ConnectRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// SessionID 唯一会话标识
+	SessionId int64 `protobuf:"varint,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	// ClientIP 客户端 IP 地址
+	ClientIp string `protobuf:"bytes,2,opt,name=client_ip,json=clientIp,proto3" json:"client_ip,omitempty"`
+	// Protocol 连接协议类型 (tcp, websocket, http)
+	Protocol string `protobuf:"bytes,3,opt,name=protocol,proto3" json:"protocol,omitempty"`
+	// ConnectTime 连接建立时间（Unix 毫秒时间戳）
+	ConnectTime int64 `protobuf:"varint,4,opt,name=connect_time,json=connectTime,proto3" json:"connect_time,omitempty"`
+	// Metadata 扩展元数据（可选，用于传递 User-Agent, 地域等信息）
+	Metadata      map[string]string `protobuf:"bytes,5,rep,name=metadata,proto3" json:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ConnectRequest) Reset() {
+	*x = ConnectRequest{}
+	mi := &file_gateway_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ConnectRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ConnectRequest) ProtoMessage() {}
+
+func (x *ConnectRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_gateway_proto_msgTypes[1]
 	if x != nil {
-		return x.TraceId
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ConnectRequest.ProtoReflect.Descriptor instead.
+func (*ConnectRequest) Descriptor() ([]byte, []int) {
+	return file_gateway_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *ConnectRequest) GetSessionId() int64 {
+	if x != nil {
+		return x.SessionId
+	}
+	return 0
+}
+
+func (x *ConnectRequest) GetClientIp() string {
+	if x != nil {
+		return x.ClientIp
 	}
 	return ""
 }
 
-func (x *GamePacket) GetSpanId() string {
+func (x *ConnectRequest) GetProtocol() string {
 	if x != nil {
-		return x.SpanId
+		return x.Protocol
 	}
 	return ""
+}
+
+func (x *ConnectRequest) GetConnectTime() int64 {
+	if x != nil {
+		return x.ConnectTime
+	}
+	return 0
+}
+
+func (x *ConnectRequest) GetMetadata() map[string]string {
+	if x != nil {
+		return x.Metadata
+	}
+	return nil
+}
+
+// ConnectResponse 连接通知响应（GameServer → Gateway）
+type ConnectResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Success 是否接受此连接
+	Success bool `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	// Reason 拒绝原因（仅当 success=false 时有意义）
+	Reason        string `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ConnectResponse) Reset() {
+	*x = ConnectResponse{}
+	mi := &file_gateway_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ConnectResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ConnectResponse) ProtoMessage() {}
+
+func (x *ConnectResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_gateway_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ConnectResponse.ProtoReflect.Descriptor instead.
+func (*ConnectResponse) Descriptor() ([]byte, []int) {
+	return file_gateway_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *ConnectResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *ConnectResponse) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+// DisconnectRequest 客户端断开请求（Gateway → GameServer）
+type DisconnectRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// SessionID 会话标识
+	SessionId int64 `protobuf:"varint,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	// Reason 断开原因 (normal, timeout, error)
+	Reason string `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
+	// DisconnectTime 断开时间（Unix 毫秒时间戳）
+	DisconnectTime int64 `protobuf:"varint,3,opt,name=disconnect_time,json=disconnectTime,proto3" json:"disconnect_time,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *DisconnectRequest) Reset() {
+	*x = DisconnectRequest{}
+	mi := &file_gateway_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DisconnectRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DisconnectRequest) ProtoMessage() {}
+
+func (x *DisconnectRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_gateway_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DisconnectRequest.ProtoReflect.Descriptor instead.
+func (*DisconnectRequest) Descriptor() ([]byte, []int) {
+	return file_gateway_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *DisconnectRequest) GetSessionId() int64 {
+	if x != nil {
+		return x.SessionId
+	}
+	return 0
+}
+
+func (x *DisconnectRequest) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *DisconnectRequest) GetDisconnectTime() int64 {
+	if x != nil {
+		return x.DisconnectTime
+	}
+	return 0
+}
+
+// DisconnectResponse 断开通知响应（GameServer → Gateway）
+type DisconnectResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Acknowledged 确认收到断开通知
+	Acknowledged  bool `protobuf:"varint,1,opt,name=acknowledged,proto3" json:"acknowledged,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DisconnectResponse) Reset() {
+	*x = DisconnectResponse{}
+	mi := &file_gateway_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DisconnectResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DisconnectResponse) ProtoMessage() {}
+
+func (x *DisconnectResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_gateway_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DisconnectResponse.ProtoReflect.Descriptor instead.
+func (*DisconnectResponse) Descriptor() ([]byte, []int) {
+	return file_gateway_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *DisconnectResponse) GetAcknowledged() bool {
+	if x != nil {
+		return x.Acknowledged
+	}
+	return false
 }
 
 var File_gateway_proto protoreflect.FileDescriptor
 
 const file_gateway_proto_rawDesc = "" +
 	"\n" +
-	"\rgateway.proto\x12\agateway\"\xba\x02\n" +
+	"\rgateway.proto\x12\agateway\"\x86\x02\n" +
 	"\n" +
 	"GamePacket\x12\x1d\n" +
 	"\n" +
@@ -133,14 +362,34 @@ const file_gateway_proto_rawDesc = "" +
 	"\x06msg_id\x18\x02 \x01(\x05R\x05msgId\x12\x18\n" +
 	"\apayload\x18\x03 \x01(\fR\apayload\x12=\n" +
 	"\bmetadata\x18\x04 \x03(\v2!.gateway.GamePacket.MetadataEntryR\bmetadata\x12,\n" +
-	"\x12target_session_ids\x18\x05 \x03(\x03R\x10targetSessionIds\x12\x19\n" +
-	"\btrace_id\x18\x06 \x01(\tR\atraceId\x12\x17\n" +
-	"\aspan_id\x18\a \x01(\tR\x06spanId\x1a;\n" +
+	"\x12target_session_ids\x18\x05 \x03(\x03R\x10targetSessionIds\x1a;\n" +
 	"\rMetadataEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x012S\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x8b\x02\n" +
+	"\x0eConnectRequest\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\x03R\tsessionId\x12\x1b\n" +
+	"\tclient_ip\x18\x02 \x01(\tR\bclientIp\x12\x1a\n" +
+	"\bprotocol\x18\x03 \x01(\tR\bprotocol\x12!\n" +
+	"\fconnect_time\x18\x04 \x01(\x03R\vconnectTime\x12A\n" +
+	"\bmetadata\x18\x05 \x03(\v2%.gateway.ConnectRequest.MetadataEntryR\bmetadata\x1a;\n" +
+	"\rMetadataEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"C\n" +
+	"\x0fConnectResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x16\n" +
+	"\x06reason\x18\x02 \x01(\tR\x06reason\"s\n" +
+	"\x11DisconnectRequest\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\x03R\tsessionId\x12\x16\n" +
+	"\x06reason\x18\x02 \x01(\tR\x06reason\x12'\n" +
+	"\x0fdisconnect_time\x18\x03 \x01(\x03R\x0edisconnectTime\"8\n" +
+	"\x12DisconnectResponse\x12\"\n" +
+	"\facknowledged\x18\x01 \x01(\bR\facknowledged2\xe4\x01\n" +
 	"\x12GameGatewayService\x12=\n" +
-	"\rStreamPackets\x12\x13.gateway.GamePacket\x1a\x13.gateway.GamePacket(\x010\x01BGZ.github.com/SkynetNext/game-gateway/api;gateway\xaa\x02\x14Game.Networking.Grpcb\x06proto3"
+	"\rStreamPackets\x12\x13.gateway.GamePacket\x1a\x13.gateway.GamePacket(\x010\x01\x12B\n" +
+	"\rNotifyConnect\x12\x17.gateway.ConnectRequest\x1a\x18.gateway.ConnectResponse\x12K\n" +
+	"\x10NotifyDisconnect\x12\x1a.gateway.DisconnectRequest\x1a\x1b.gateway.DisconnectResponseBGZ.github.com/SkynetNext/game-gateway/api;gateway\xaa\x02\x14Game.Networking.Grpcb\x06proto3"
 
 var (
 	file_gateway_proto_rawDescOnce sync.Once
@@ -154,20 +403,30 @@ func file_gateway_proto_rawDescGZIP() []byte {
 	return file_gateway_proto_rawDescData
 }
 
-var file_gateway_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_gateway_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_gateway_proto_goTypes = []any{
-	(*GamePacket)(nil), // 0: gateway.GamePacket
-	nil,                // 1: gateway.GamePacket.MetadataEntry
+	(*GamePacket)(nil),         // 0: gateway.GamePacket
+	(*ConnectRequest)(nil),     // 1: gateway.ConnectRequest
+	(*ConnectResponse)(nil),    // 2: gateway.ConnectResponse
+	(*DisconnectRequest)(nil),  // 3: gateway.DisconnectRequest
+	(*DisconnectResponse)(nil), // 4: gateway.DisconnectResponse
+	nil,                        // 5: gateway.GamePacket.MetadataEntry
+	nil,                        // 6: gateway.ConnectRequest.MetadataEntry
 }
 var file_gateway_proto_depIdxs = []int32{
-	1, // 0: gateway.GamePacket.metadata:type_name -> gateway.GamePacket.MetadataEntry
-	0, // 1: gateway.GameGatewayService.StreamPackets:input_type -> gateway.GamePacket
-	0, // 2: gateway.GameGatewayService.StreamPackets:output_type -> gateway.GamePacket
-	2, // [2:3] is the sub-list for method output_type
-	1, // [1:2] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	5, // 0: gateway.GamePacket.metadata:type_name -> gateway.GamePacket.MetadataEntry
+	6, // 1: gateway.ConnectRequest.metadata:type_name -> gateway.ConnectRequest.MetadataEntry
+	0, // 2: gateway.GameGatewayService.StreamPackets:input_type -> gateway.GamePacket
+	1, // 3: gateway.GameGatewayService.NotifyConnect:input_type -> gateway.ConnectRequest
+	3, // 4: gateway.GameGatewayService.NotifyDisconnect:input_type -> gateway.DisconnectRequest
+	0, // 5: gateway.GameGatewayService.StreamPackets:output_type -> gateway.GamePacket
+	2, // 6: gateway.GameGatewayService.NotifyConnect:output_type -> gateway.ConnectResponse
+	4, // 7: gateway.GameGatewayService.NotifyDisconnect:output_type -> gateway.DisconnectResponse
+	5, // [5:8] is the sub-list for method output_type
+	2, // [2:5] is the sub-list for method input_type
+	2, // [2:2] is the sub-list for extension type_name
+	2, // [2:2] is the sub-list for extension extendee
+	0, // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_gateway_proto_init() }
@@ -181,7 +440,7 @@ func file_gateway_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_gateway_proto_rawDesc), len(file_gateway_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   2,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

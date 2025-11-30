@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	gateway "github.com/SkynetNext/game-gateway/api"
 	"github.com/SkynetNext/game-gateway/internal/logger"
@@ -27,9 +28,10 @@ type Manager struct {
 }
 
 type Client struct {
-	conn   *grpc.ClientConn
-	stream gateway.GameGatewayService_StreamPacketsClient
-	cancel context.CancelFunc
+	conn      *grpc.ClientConn
+	svcClient gateway.GameGatewayServiceClient // 复用 service client
+	stream    gateway.GameGatewayService_StreamPacketsClient
+	cancel    context.CancelFunc
 }
 
 func NewManager(gatewayName string, handler PacketHandler) *Manager {
@@ -107,9 +109,10 @@ func (m *Manager) getClient(ctx context.Context, address string) (*Client, error
 	go m.recvLoop(address, stream)
 
 	client = &Client{
-		conn:   conn,
-		stream: stream,
-		cancel: cancel,
+		conn:      conn,
+		svcClient: svcClient, // 保存 service client 供 NotifyConnect/Disconnect 复用
+		stream:    stream,
+		cancel:    cancel,
 	}
 	m.clients[address] = client
 
@@ -138,4 +141,131 @@ func (m *Manager) recvLoop(address string, stream gateway.GameGatewayService_Str
 			m.handler(packet)
 		}
 	}
+}
+
+// NotifyConnect 通知后端服务器客户端连接建立
+// 业界最佳实践：连接建立时通知一次，携带完整元数据
+func (m *Manager) NotifyConnect(ctx context.Context, address string, sessionID int64, clientIP string, protocol string) error {
+	ctx, span := tracing.StartSpan(ctx, "gateway.notify_connect")
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.String("backend.address", address),
+		attribute.Int64("session.id", sessionID),
+		attribute.String("client.ip", clientIP),
+		attribute.String("protocol", protocol),
+	)
+
+	// 获取或创建 gRPC 客户端（复用已有连接）
+	client, err := m.getClient(ctx, address)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "get client failed")
+		return fmt.Errorf("failed to get client for %s: %w", address, err)
+	}
+
+	// 复用已有的 service client（避免重复创建）
+	svcClient := client.svcClient
+
+	// 添加 gate-name 元数据
+	md := metadata.Pairs("gate-name", m.gatewayName)
+	callCtx := metadata.NewOutgoingContext(ctx, md)
+
+	// 调用 NotifyConnect RPC
+	req := &gateway.ConnectRequest{
+		SessionId:   sessionID,
+		ClientIp:    clientIP,
+		Protocol:    protocol,
+		ConnectTime: time.Now().UnixMilli(),
+		Metadata:    make(map[string]string),
+	}
+
+	resp, err := svcClient.NotifyConnect(callCtx, req)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "notify connect failed")
+		logger.Error("Failed to notify connect",
+			zap.String("address", address),
+			zap.Int64("sessionID", sessionID),
+			zap.Error(err))
+		return fmt.Errorf("failed to notify connect to %s: %w", address, err)
+	}
+
+	if !resp.Success {
+		span.SetStatus(codes.Error, "connect rejected")
+		logger.Warn("Connect rejected by backend",
+			zap.String("address", address),
+			zap.Int64("sessionID", sessionID),
+			zap.String("reason", resp.Reason))
+		return fmt.Errorf("connect rejected: %s", resp.Reason)
+	}
+
+	span.SetStatus(codes.Ok, "connect notified")
+	logger.Debug("Notified backend of client connect",
+		zap.String("address", address),
+		zap.Int64("sessionID", sessionID),
+		zap.String("clientIP", clientIP))
+
+	return nil
+}
+
+// NotifyDisconnect 通知后端服务器客户端断开连接
+// 业界最佳实践：连接断开时通知，及时清理资源
+func (m *Manager) NotifyDisconnect(ctx context.Context, address string, sessionID int64, reason string) error {
+	ctx, span := tracing.StartSpan(ctx, "gateway.notify_disconnect")
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.String("backend.address", address),
+		attribute.Int64("session.id", sessionID),
+		attribute.String("reason", reason),
+	)
+
+	// 获取现有客户端（断开时可能连接已关闭，所以不强制创建）
+	m.mu.RLock()
+	client, ok := m.clients[address]
+	m.mu.RUnlock()
+
+	if !ok {
+		// 连接已关闭，记录但不报错
+		logger.Debug("gRPC client already closed, skip disconnect notification",
+			zap.String("address", address),
+			zap.Int64("sessionID", sessionID))
+		return nil
+	}
+
+	// 复用已有的 service client（避免重复创建）
+	svcClient := client.svcClient
+
+	// 添加 gate-name 元数据
+	md := metadata.Pairs("gate-name", m.gatewayName)
+	callCtx := metadata.NewOutgoingContext(ctx, md)
+
+	// 调用 NotifyDisconnect RPC
+	req := &gateway.DisconnectRequest{
+		SessionId:      sessionID,
+		Reason:         reason,
+		DisconnectTime: time.Now().UnixMilli(),
+	}
+
+	resp, err := svcClient.NotifyDisconnect(callCtx, req)
+	if err != nil {
+		// 断开通知失败不是致命错误，记录日志即可
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "notify disconnect failed")
+		logger.Warn("Failed to notify disconnect",
+			zap.String("address", address),
+			zap.Int64("sessionID", sessionID),
+			zap.Error(err))
+		return nil // 不返回错误，避免影响断开流程
+	}
+
+	if resp.Acknowledged {
+		span.SetStatus(codes.Ok, "disconnect acknowledged")
+		logger.Debug("Backend acknowledged client disconnect",
+			zap.String("address", address),
+			zap.Int64("sessionID", sessionID))
+	}
+
+	return nil
 }
