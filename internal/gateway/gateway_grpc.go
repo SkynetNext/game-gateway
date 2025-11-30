@@ -79,6 +79,7 @@ func (g *Gateway) forwardGrpcConnection(ctx context.Context, sessID int64, clien
 
 	g.configMu.RLock()
 	maxMessageSize := g.config.Security.MaxMessageSize
+	enableTracePropagation := g.config.Tracing.EnableTracePropagation
 	g.configMu.RUnlock()
 
 	packetCount := 0
@@ -102,6 +103,11 @@ func (g *Gateway) forwardGrpcConnection(ctx context.Context, sessID int64, clien
 			SessionId: sessID,
 			MsgId:     int32(header.MessageID),
 			Payload:   data,
+		}
+
+		// Propagate trace context if enabled
+		if enableTracePropagation {
+			packet.Metadata = extractTraceContext(ctx)
 		}
 
 		err = g.grpcManager.Send(ctx, backendAddr, packet)

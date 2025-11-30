@@ -834,6 +834,7 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 			SessionId: sessionID,
 			MsgId:     int32(clientHeader.MessageID),
 			Payload:   messageData,
+			Metadata:  traceContext, // Propagate trace context in gRPC mode
 		}
 		if err := g.grpcManager.Send(ctx, backendAddr, packet); err != nil {
 			connStats.status = "error"
