@@ -9,7 +9,7 @@ server:
   # Set to 0 for default gateway, or configure unique ID for each gateway instance
   gateway_app_id: 0
   # Use gRPC for backend communication
-  use_grpc: false
+  use_grpc: true
 
 redis:
   # Redis 地址：生产环境使用 K8s 集群内 Redis
