@@ -22,8 +22,8 @@ type Manager struct {
 	mu      sync.RWMutex
 	clients map[string]*Client // address -> client
 
-	gatewayID uint32
-	handler   PacketHandler
+	gatewayName string // Pod Name (e.g., "game-gateway-7d8f9c-abc12")
+	handler     PacketHandler
 }
 
 type Client struct {
@@ -32,11 +32,11 @@ type Client struct {
 	cancel context.CancelFunc
 }
 
-func NewManager(gatewayID uint32, handler PacketHandler) *Manager {
+func NewManager(gatewayName string, handler PacketHandler) *Manager {
 	return &Manager{
-		clients:   make(map[string]*Client),
-		gatewayID: gatewayID,
-		handler:   handler,
+		clients:     make(map[string]*Client),
+		gatewayName: gatewayName,
+		handler:     handler,
 	}
 }
 
@@ -72,7 +72,7 @@ func (m *Manager) getClient(ctx context.Context, address string) (*Client, error
 
 	span.SetAttributes(
 		attribute.String("backend.address", address),
-		attribute.Int("gateway.id", int(m.gatewayID)),
+		attribute.String("gateway.name", m.gatewayName),
 		attribute.String("transport", "grpc"),
 	)
 
@@ -88,7 +88,7 @@ func (m *Manager) getClient(ctx context.Context, address string) (*Client, error
 	svcClient := gateway.NewGameGatewayServiceClient(conn)
 
 	// Create stream with metadata and trace context
-	md := metadata.Pairs("gate-id", fmt.Sprintf("%d", m.gatewayID))
+	md := metadata.Pairs("gate-name", m.gatewayName)
 	streamCtx, cancel := context.WithCancel(spanCtx) // Use span context to propagate trace
 	streamCtx = metadata.NewOutgoingContext(streamCtx, md)
 

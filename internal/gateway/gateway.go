@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -132,8 +133,17 @@ func New(cfg *config.Config, podName string) (*Gateway, error) {
 	}
 
 	if cfg.Server.UseGrpc {
-		g.grpcManager = grpcmgr.NewManager(cfg.Server.GatewayAppID, g.handleGrpcPacket)
-		logger.Info("gRPC transport enabled", zap.Uint32("app_id", cfg.Server.GatewayAppID))
+		// Determine Gateway Name: config > POD_NAME env > pod name parameter
+		gatewayName := cfg.Server.GatewayName
+		if gatewayName == "" {
+			gatewayName = os.Getenv("POD_NAME")
+		}
+		if gatewayName == "" {
+			gatewayName = podName
+		}
+
+		g.grpcManager = grpcmgr.NewManager(gatewayName, g.handleGrpcPacket)
+		logger.Info("gRPC transport enabled", zap.String("gateway_name", gatewayName))
 	}
 
 	return g, nil

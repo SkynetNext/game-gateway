@@ -46,10 +46,11 @@ type ServerConfig struct {
 	// Metrics port
 	MetricsPort int `yaml:"metrics_port"`
 
-	// Gateway AppID for cluster communication
-	// This ID is sent in ClusterClientRegister handshake message
+	// Gateway Name for cluster communication (typically Pod Name)
+	// This name is sent in gRPC metadata (gate-name header)
 	// Backend servers use this to identify the gateway
-	GatewayAppID uint32 `yaml:"gateway_app_id"`
+	// If empty, will use POD_NAME environment variable
+	GatewayName string `yaml:"gateway_name"`
 
 	// Use gRPC for backend communication
 	UseGrpc bool `yaml:"use_grpc"`

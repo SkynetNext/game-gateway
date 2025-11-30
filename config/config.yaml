@@ -4,10 +4,11 @@ server:
   listen_addr: ":8080"
   health_check_port: 9090
   metrics_port: 9091
-  # Gateway AppID for cluster communication (sent in handshake)
+  # Gateway Name for cluster communication (typically Pod Name)
+  # This name is sent in gRPC metadata (gate-name header)
   # Backend servers use this to identify the gateway
-  # Set to 0 for default gateway, or configure unique ID for each gateway instance
-  gateway_app_id: 0
+  # If empty, will use POD_NAME environment variable (recommended for K8s)
+  gateway_name: "" # Leave empty to auto-detect from POD_NAME
   # Use gRPC for backend communication
   use_grpc: true
 
