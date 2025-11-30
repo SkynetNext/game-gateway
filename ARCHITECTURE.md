@@ -491,6 +491,110 @@ HPA:
 - **Health Checks**: Liveness and readiness probes
 - **Graceful Shutdown**: Drain mode with connection cleanup
 
+### gRPC Communication Architecture: Gateway ↔ GameServer
+
+In gRPC mode, multiple Gateway pods communicate with multiple GameServer instances. Each Gateway maintains bidirectional streams to GameServer instances based on routing rules.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                        Gateway Pods (Multiple)                       │
+│                                                                     │
+│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐│
+│  │ Gateway Pod 1    │  │ Gateway Pod 2    │  │ Gateway Pod 3    ││
+│  │ game-gateway-abc │  │ game-gateway-xyz │  │ game-gateway-123 ││
+│  │                  │  │                  │  │                  ││
+│  │ ┌──────────────┐ │  │ ┌──────────────┐ │  │ ┌──────────────┐ ││
+│  │ │gRPC Manager  │ │  │ │gRPC Manager  │ │  │ │gRPC Manager  │ ││
+│  │ │              │ │  │ │              │ │  │ │              │ ││
+│  │ │ Clients Map: │ │  │ │ Clients Map: │ │  │ │ Clients Map: │ ││
+│  │ │ game-0:conn1 │ │  │ │ game-0:conn1 │ │  │ │ game-0:conn1 │ ││
+│  │ │ game-1:conn2 │ │  │ │ game-1:conn2 │ │  │ │ game-2:conn3 │ ││
+│  │ └──────┬───────┘ │  │ └──────┬───────┘ │  │ └──────┬───────┘ ││
+│  └────────┼─────────┘  └────────┼─────────┘  └────────┼─────────┘│
+│           │                     │                     │          │
+│           │ StreamPackets       │ StreamPackets       │ StreamPackets│
+│           │ NotifyConnect        │ NotifyConnect        │ NotifyConnect│
+│           │ NotifyDisconnect     │ NotifyDisconnect     │ NotifyDisconnect│
+│           │                     │                     │          │
+└───────────┼─────────────────────┼─────────────────────┼──────────┘
+            │                     │                     │
+            │  ┌──────────────────┼──────────────────┐ │
+            │  │                  │                  │ │
+            ▼  ▼                  ▼                  ▼ ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                    GameServer Instances (Multiple)                   │
+│                                                                     │
+│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐│
+│  │ GameServer 0     │  │ GameServer 1     │  │ GameServer 2     ││
+│  │ hgame-game-0     │  │ hgame-game-1     │  │ hgame-game-2     ││
+│  │                  │  │                  │  │                  ││
+│  │ ┌──────────────┐ │  │ ┌──────────────┐ │  │ ┌──────────────┐ ││
+│  │ │GrpcConnMgr   │ │  │ │GrpcConnMgr   │ │  │ │GrpcConnMgr   │ ││
+│  │ │              │ │  │ │              │ │  │ │              │ ││
+│  │ │ Streams:     │ │  │ │ Streams:     │ │  │ │ Streams:     │ ││
+│  │ │ abc → stream1│ │  │ │ abc → stream1│ │  │ │ abc → stream1│ ││
+│  │ │ xyz → stream2│ │  │ │ xyz → stream2│ │  │ │ 123 → stream3│ ││
+│  │ │ 123 → stream3│ │  │ │              │ │  │ │              │ ││
+│  │ └──────────────┘ │  │ └──────────────┘ │  │ └──────────────┘ ││
+│  │                  │  │                  │  │                  ││
+│  │GameGatewayService│  │GameGatewayService│  │GameGatewayService││
+│  └──────────────────┘  └──────────────────┘  └──────────────────┘│
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+#### Connection Model
+
+**Gateway Side**:
+- Each Gateway Pod maintains a **gRPC client connection pool** (`grpc/manager.go`)
+- **One bidirectional stream** (`StreamPackets`) per GameServer address
+- Stream is established when first client session routes to that GameServer
+- Stream is reused for all client sessions routed to the same GameServer
+- Gateway Pod Name (e.g., `game-gateway-abc123`) is sent in gRPC metadata header (`gate-name`)
+
+**GameServer Side**:
+- Each GameServer instance maintains a **GrpcConnectionManager**
+- Maps Gateway Pod Name → `IServerStreamWriter<GamePacket>` stream
+- Each Gateway Pod establishes one `StreamPackets` stream per GameServer
+- Multiple Gateway Pods can connect to the same GameServer instance
+
+#### Communication Patterns
+
+1. **StreamPackets (Bidirectional Stream)**:
+   - **Purpose**: Message forwarding (Gateway → GameServer, GameServer → Gateway)
+   - **Frequency**: One stream per Gateway Pod per GameServer address
+   - **Lifecycle**: Long-lived, established on first use, closed when Gateway disconnects
+   - **Metadata**: `gate-name` header sent once during stream establishment
+
+2. **NotifyConnect (Unary RPC)**:
+   - **Purpose**: Notify GameServer of new client connection
+   - **Frequency**: Once per client connection
+   - **Metadata**: `gate-name` header sent with each call
+   - **Caching**: GameServer caches `sessionID → gatewayName` mapping for login flow
+
+3. **NotifyDisconnect (Unary RPC)**:
+   - **Purpose**: Notify GameServer of client disconnection
+   - **Frequency**: Once per client disconnection
+   - **Metadata**: `gate-name` header sent with each call
+   - **Cleanup**: GameServer removes `sessionID → gatewayName` mapping
+
+#### Routing Logic
+
+- Gateway uses **Router** to select GameServer address based on:
+  - `serverType` (e.g., GameServer, AccountServer)
+  - `worldID` (realm ID)
+  - `instID` (instance ID)
+- Router queries Redis for routing rules (hot reload support)
+- Each Gateway independently routes client sessions to appropriate GameServer
+- Multiple Gateway Pods can route to the same GameServer instance
+
+#### Benefits
+
+1. **Horizontal Scalability**: Gateway Pods scale independently
+2. **Load Distribution**: Client sessions distributed across Gateway Pods
+3. **Fault Tolerance**: Gateway Pod failure only affects its own sessions
+4. **Efficient Connection Reuse**: One stream per Gateway-GameServer pair
+5. **Centralized GameServer**: GameServer instances manage all Gateway connections
+
 ## Scalability
 
 ### Horizontal Scaling

@@ -3,6 +3,7 @@ package grpc
 import (
 	"context"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 
@@ -48,7 +49,24 @@ func (m *Manager) Send(ctx context.Context, address string, packet *gateway.Game
 		return err
 	}
 
-	return client.stream.Send(packet)
+	err = client.stream.Send(packet)
+	if err != nil {
+		// 发送失败，可能是连接断开，清理旧连接以便下次重连
+		m.mu.Lock()
+		if c, ok := m.clients[address]; ok && c.stream == client.stream {
+			delete(m.clients, address)
+			c.conn.Close()
+			c.cancel()
+		}
+		m.mu.Unlock()
+
+		logger.Warn("gRPC send failed, connection will be recreated on next send",
+			zap.String("address", address),
+			zap.Error(err))
+		return fmt.Errorf("send failed: %w", err)
+	}
+
+	return nil
 }
 
 func (m *Manager) getClient(ctx context.Context, address string) (*Client, error) {
@@ -78,32 +96,69 @@ func (m *Manager) getClient(ctx context.Context, address string) (*Client, error
 		attribute.String("transport", "grpc"),
 	)
 
-	// Create new connection using NewClient (replaces deprecated Dial/DialContext)
-	// Note: NewClient returns a client that is initially idle and doesn't connect immediately
-	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "dial failed")
-		return nil, fmt.Errorf("failed to create client for %s: %w", address, err)
+	// 重试逻辑：最多重试 3 次，指数退避
+	const maxRetries = 3
+	var conn *grpc.ClientConn
+	var stream gateway.GameGatewayService_StreamPacketsClient
+	var cancel context.CancelFunc
+	var err error
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			// 指数退避：100ms, 200ms, 400ms
+			backoff := time.Duration(100*(1<<uint(attempt-1))) * time.Millisecond
+			logger.Info("Retrying gRPC connection",
+				zap.String("address", address),
+				zap.Int("attempt", attempt+1),
+				zap.Duration("backoff", backoff))
+			time.Sleep(backoff)
+		}
+
+		// Create new connection using NewClient (replaces deprecated Dial/DialContext)
+		// Note: NewClient returns a client that is initially idle and doesn't connect immediately
+		conn, err = grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			span.RecordError(err)
+			logger.Warn("Failed to create gRPC client",
+				zap.String("address", address),
+				zap.Int("attempt", attempt+1),
+				zap.Error(err))
+			continue // 重试
+		}
+
+		svcClient := gateway.NewGameGatewayServiceClient(conn)
+
+		// Create stream with metadata and trace context
+		md := metadata.Pairs("gate-name", m.gatewayName)
+		streamCtx, cancelFunc := context.WithCancel(spanCtx) // Use span context to propagate trace
+		streamCtx = metadata.NewOutgoingContext(streamCtx, md)
+		cancel = cancelFunc
+
+		stream, err = svcClient.StreamPackets(streamCtx)
+		if err != nil {
+			cancel()
+			conn.Close()
+			span.RecordError(err)
+			logger.Warn("Failed to create gRPC stream",
+				zap.String("address", address),
+				zap.Int("attempt", attempt+1),
+				zap.Error(err))
+			continue // 重试
+		}
+
+		// 成功，退出重试循环
+		break
 	}
 
-	svcClient := gateway.NewGameGatewayServiceClient(conn)
-
-	// Create stream with metadata and trace context
-	md := metadata.Pairs("gate-name", m.gatewayName)
-	streamCtx, cancel := context.WithCancel(spanCtx) // Use span context to propagate trace
-	streamCtx = metadata.NewOutgoingContext(streamCtx, md)
-
-	stream, err := svcClient.StreamPackets(streamCtx)
 	if err != nil {
-		cancel()
-		conn.Close()
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "create stream failed")
-		return nil, fmt.Errorf("failed to create stream to %s: %w", address, err)
+		span.SetStatus(codes.Error, "connection failed after retries")
+		return nil, fmt.Errorf("failed to create stream to %s after %d attempts: %w", address, maxRetries, err)
 	}
 
 	span.SetStatus(codes.Ok, "connected")
+
+	// 重新获取 service client（在循环外部）
+	svcClient := gateway.NewGameGatewayServiceClient(conn)
 
 	// Start receiving goroutine
 	go m.recvLoop(address, stream)
@@ -133,7 +188,12 @@ func (m *Manager) recvLoop(address string, stream gateway.GameGatewayService_Str
 	for {
 		packet, err := stream.Recv()
 		if err != nil {
-			logger.Error("gRPC stream error", zap.String("address", address), zap.Error(err))
+			// EOF 是正常关闭信号，不应该作为 ERROR
+			if err == io.EOF {
+				logger.Info("gRPC stream closed by server", zap.String("address", address))
+			} else {
+				logger.Error("gRPC stream error", zap.String("address", address), zap.Error(err))
+			}
 			return
 		}
 
@@ -156,7 +216,7 @@ func (m *Manager) NotifyConnect(ctx context.Context, address string, sessionID i
 		attribute.String("protocol", protocol),
 	)
 
-	// 获取或创建 gRPC 客户端（复用已有连接）
+	// 获取或创建 gRPC 客户端（复用已有连接，失败时自动重连）
 	client, err := m.getClient(ctx, address)
 	if err != nil {
 		span.RecordError(err)
