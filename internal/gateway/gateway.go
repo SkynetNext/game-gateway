@@ -67,8 +67,7 @@ type Gateway struct {
 
 	// Session ID generation
 	sessionSeq uint64 // Session sequence counter (atomic)
-	startTime  int64  // Start timestamp (seconds)
-	podHash    uint16 // Pod name hash (16 bits, computed at startup)
+	podHash    uint16 // Pod name hash (12 bits used, computed at startup)
 
 	// State
 	draining int32 // Atomic: 0=Running, 1=Draining
@@ -122,7 +121,6 @@ func New(cfg *config.Config, podName string) (*Gateway, error) {
 	g := &Gateway{
 		config:          cfg,
 		podName:         podName,
-		startTime:       time.Now().Unix(),
 		podHash:         podHash,
 		sessionManager:  sessionMgr,
 		poolManager:     poolMgr,
@@ -1152,18 +1150,60 @@ func (g *Gateway) forwardConnection(ctx context.Context, sess *session.Session, 
 	}
 }
 
-// generateSessionID generates a unique session ID
-// Format: (podHash << 48) + (timestamp << 16) + sequence
-func (g *Gateway) generateSessionID() int64 {
-	seq := atomic.AddUint64(&g.sessionSeq, 1)
+// SessionIDComponents represents the parsed components of a session ID
+type SessionIDComponents struct {
+	PodHash   uint16    // 12-bit pod hash
+	Timestamp int64     // 40-bit timestamp in milliseconds
+	Sequence  uint16    // 12-bit sequence number
+	CreatedAt time.Time // Parsed time
+}
 
-	seq16 := uint16(seq & 0xFFFF)
-	if seq16 == 0 {
-		seq16 = 1
-		atomic.StoreUint64(&g.sessionSeq, 1)
+// ParseSessionID parses a session ID into its components
+// Useful for debugging and tracing
+func ParseSessionID(sessionID int64) SessionIDComponents {
+	podHash := uint16((sessionID >> 52) & 0xFFF)
+	timestampMs := (sessionID >> 12) & 0xFFFFFFFFFF
+	sequence := uint16(sessionID & 0xFFF)
+
+	return SessionIDComponents{
+		PodHash:   podHash,
+		Timestamp: timestampMs,
+		Sequence:  sequence,
+		CreatedAt: time.UnixMilli(timestampMs),
 	}
+}
 
-	sessionID := (int64(g.podHash) << 48) | (g.startTime << 16) | int64(seq16)
+// generateSessionID generates a unique session ID
+// Improved Snowflake-like algorithm with millisecond precision
+// Format: (podHash << 52) + (timestamp_ms << 12) + sequence
+//
+// Structure (64-bit):
+// ┌──────────────┬──────────────────────────────────────┬──────────────┐
+// │  Pod Hash    │      Timestamp (milliseconds)        │   Sequence   │
+// │   12 bits    │            40 bits                   │   12 bits    │
+// └──────────────┴──────────────────────────────────────┴──────────────┘
+//
+// - Pod Hash: 12-bit (4096 unique pods), derived from pod name CRC32
+// - Timestamp: 40-bit milliseconds since epoch (can represent ~34 years)
+// - Sequence: 12-bit counter (4096 IDs per millisecond per pod)
+//
+// Benefits:
+// - Time-ordered: sessions can be sorted by creation time
+// - Distributed: no coordination needed between pods
+// - High throughput: 4M IDs/second per pod
+// - Traceable: can identify which pod created the session
+func (g *Gateway) generateSessionID() int64 {
+	seq := atomic.AddUint64(&g.sessionSeq, 1) & 0xFFF // 12-bit sequence (0-4095)
+
+	// Get current timestamp in milliseconds, use lower 40 bits
+	// 40-bit can represent: 2^40 ms = 1,099,511,627,776 ms ≈ 34.8 years
+	timestampMs := time.Now().UnixMilli() & 0xFFFFFFFFFF
+
+	// Use lower 12 bits of podHash to avoid collision
+	podHash12 := int64(g.podHash & 0xFFF)
+
+	// Combine: [12-bit pod hash][40-bit timestamp][12-bit sequence]
+	sessionID := (podHash12 << 52) | (timestampMs << 12) | int64(seq)
 
 	return sessionID
 }
