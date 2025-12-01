@@ -68,8 +68,9 @@ type Gateway struct {
 	metricsServer *http.Server
 
 	// Session ID generation
-	sessionSeq uint64 // Session sequence counter (atomic)
-	podHash    uint16 // Pod name hash (12 bits used, computed at startup)
+	sessionSeq    uint64 // Session sequence counter (atomic)
+	lastTimestamp int64  // Last timestamp used for ID generation (atomic)
+	podHash       uint16 // Pod name hash (12 bits used, computed at startup)
 
 	// State
 	draining int32 // Atomic: 0=Running, 1=Draining
@@ -1227,19 +1228,53 @@ func ParseSessionID(sessionID int64) SessionIDComponents {
 // - High throughput: 4M IDs/second per pod
 // - Traceable: can identify which pod created the session
 func (g *Gateway) generateSessionID() int64 {
-	seq := atomic.AddUint64(&g.sessionSeq, 1) & 0xFFF // 12-bit sequence (0-4095)
+	for {
+		// Get current timestamp in milliseconds, use lower 40 bits
+		// 40-bit can represent: 2^40 ms = 1,099,511,627,776 ms ≈ 34.8 years
+		timestampMs := time.Now().UnixMilli() & 0xFFFFFFFFFF
 
-	// Get current timestamp in milliseconds, use lower 40 bits
-	// 40-bit can represent: 2^40 ms = 1,099,511,627,776 ms ≈ 34.8 years
-	timestampMs := time.Now().UnixMilli() & 0xFFFFFFFFFF
+		// Get last timestamp atomically
+		lastTs := atomic.LoadInt64(&g.lastTimestamp)
 
-	// Use lower 12 bits of podHash to avoid collision
-	podHash12 := int64(g.podHash & 0xFFF)
+		if timestampMs < lastTs {
+			// Clock moved backwards, wait for next millisecond
+			time.Sleep(time.Millisecond)
+			continue
+		}
 
-	// Combine: [12-bit pod hash][40-bit timestamp][12-bit sequence]
-	sessionID := (podHash12 << 52) | (timestampMs << 12) | int64(seq)
+		var seq uint64
+		if timestampMs == lastTs {
+			// Same millisecond: increment sequence
+			seq = atomic.AddUint64(&g.sessionSeq, 1) & 0xFFF // 12-bit sequence (0-4095)
 
-	return sessionID
+			// If sequence wrapped around (back to 0 after 4095), wait for next millisecond
+			// Note: seq == 0 means we've exhausted all 4096 IDs in this millisecond
+			if seq == 0 {
+				// Sequence exhausted for this millisecond, wait for next
+				time.Sleep(time.Millisecond)
+				continue
+			}
+		} else {
+			// New millisecond: reset sequence and update timestamp atomically
+			// Use CAS to ensure only one goroutine updates the timestamp
+			if atomic.CompareAndSwapInt64(&g.lastTimestamp, lastTs, timestampMs) {
+				// Successfully updated timestamp, reset sequence
+				atomic.StoreUint64(&g.sessionSeq, 1)
+				seq = 1
+			} else {
+				// Another goroutine updated timestamp, retry
+				continue
+			}
+		}
+
+		// Use lower 12 bits of podHash to avoid collision
+		podHash12 := int64(g.podHash & 0xFFF)
+
+		// Combine: [12-bit pod hash][40-bit timestamp][12-bit sequence]
+		sessionID := (podHash12 << 52) | (timestampMs << 12) | int64(seq)
+
+		return sessionID
+	}
 }
 
 // healthHandler handles health check requests
