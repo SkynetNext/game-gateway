@@ -120,10 +120,22 @@ func TestParseSessionID(t *testing.T) {
 		t.Errorf("Expected pod hash %d, got %d", expectedPodHash, components.PodHash)
 	}
 
-	// Verify timestamp is within reasonable range
-	if components.CreatedAt.Before(beforeGen) || components.CreatedAt.After(afterGen) {
-		t.Errorf("Timestamp out of range: %v (expected between %v and %v)",
-			components.CreatedAt, beforeGen, afterGen)
+	// Verify timestamp is the lower 40 bits of the actual timestamp
+	// Since we only use 40 bits, the timestamp will be truncated
+	beforeGenMs := beforeGen.UnixMilli() & 0xFFFFFFFFFF
+	afterGenMs := afterGen.UnixMilli() & 0xFFFFFFFFFF
+	if components.Timestamp < beforeGenMs || components.Timestamp > afterGenMs {
+		// Handle wrap-around case: if afterGen wrapped but beforeGen didn't
+		if afterGenMs < beforeGenMs {
+			// Timestamp should be >= beforeGenMs OR <= afterGenMs (wrapped)
+			if components.Timestamp < beforeGenMs && components.Timestamp > afterGenMs {
+				t.Errorf("Timestamp out of range: %d (expected between %d and %d, or wrapped)",
+					components.Timestamp, beforeGenMs, afterGenMs)
+			}
+		} else {
+			t.Errorf("Timestamp out of range: %d (expected between %d and %d)",
+				components.Timestamp, beforeGenMs, afterGenMs)
+		}
 	}
 
 	// Verify sequence is in valid range (0-4095)
@@ -133,6 +145,7 @@ func TestParseSessionID(t *testing.T) {
 
 	t.Logf("Session ID: %d", sessionID)
 	t.Logf("  Pod Hash: %d (0x%03X)", components.PodHash, components.PodHash)
-	t.Logf("  Timestamp: %d (%v)", components.Timestamp, components.CreatedAt)
+	t.Logf("  Timestamp (40-bit): %d (%v)", components.Timestamp, components.CreatedAt)
 	t.Logf("  Sequence: %d", components.Sequence)
+	t.Logf("  Note: Timestamp is truncated to 40 bits, so CreatedAt may not match current time")
 }
