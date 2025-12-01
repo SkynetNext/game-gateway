@@ -36,7 +36,8 @@ type GamePacket struct {
 	// Metadata is used for extended fields like TraceContext and packet type
 	// For connection events, metadata must contain:
 	//   - "packet_type": "connect" or "disconnect"
-	//   - For "connect": "gateway_name", "client_ip", "protocol", "connect_time" (Unix milliseconds)
+	//   - For "connect": "client_ip", "protocol", "connect_time" (Unix milliseconds)
+	//     Note: gateway_name is obtained from gRPC header during stream establishment, not from packet metadata
 	//   - For "disconnect": "reason", "disconnect_time" (Unix milliseconds)
 	//
 	// For normal game messages, metadata may contain:
