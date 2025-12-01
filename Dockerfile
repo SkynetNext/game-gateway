@@ -5,6 +5,9 @@ FROM golang:1.24-alpine AS builder
 ARG GOPROXY=https://proxy.golang.org,direct
 ARG CGO_ENABLED=0
 ARG GOOS=linux
+ARG VERSION=dev
+ARG BUILD_TIME=unknown
+ARG GIT_COMMIT=unknown
 
 # Set as environment variables for use in RUN commands
 ENV GOPROXY=${GOPROXY}
@@ -20,8 +23,10 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build
-RUN go build -a -installsuffix cgo -o game-gateway ./cmd/gateway
+# Build with version info injection
+RUN go build -a -installsuffix cgo \
+    -ldflags "-X main.version=${VERSION} -X main.buildTime=${BUILD_TIME} -X main.gitCommit=${GIT_COMMIT}" \
+    -o game-gateway ./cmd/gateway
 
 # Runtime stage
 FROM alpine:latest

@@ -1196,9 +1196,12 @@ type SessionIDComponents struct {
 // ParseSessionID parses a session ID into its components
 // Useful for debugging and tracing
 func ParseSessionID(sessionID int64) SessionIDComponents {
-	podHash := uint16((sessionID >> 52) & 0xFFF)
-	timestampMs := (sessionID >> 12) & 0xFFFFFFFFFF
-	sequence := uint16(sessionID & 0xFFF)
+	// Convert to uint64 to avoid sign extension issues
+	u := uint64(sessionID)
+
+	podHash := uint16((u >> 52) & 0xFFF)
+	timestampMs := int64((u >> 12) & 0xFFFFFFFFFF)
+	sequence := uint16(u & 0xFFF)
 
 	return SessionIDComponents{
 		PodHash:   podHash,
