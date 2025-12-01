@@ -16,7 +16,7 @@ import (
 
 // handleGrpcPacket handles packets received from GameServer via gRPC
 func (g *Gateway) handleGrpcPacket(packet *gateway.GamePacket) {
-	// 广播处理
+	// Handle broadcast packets
 	if len(packet.TargetSessionIds) > 0 {
 		for _, sessID := range packet.TargetSessionIds {
 			g.sendToSession(sessID, packet)
@@ -24,7 +24,7 @@ func (g *Gateway) handleGrpcPacket(packet *gateway.GamePacket) {
 		return
 	}
 
-	// 单播处理
+	// Handle unicast packets
 	if packet.SessionId > 0 {
 		g.sendToSession(packet.SessionId, packet)
 	}
@@ -37,7 +37,7 @@ func (g *Gateway) sendToSession(sessionID int64, packet *gateway.GamePacket) {
 	}
 
 	if sess.ClientConn != nil {
-		// 设置写超时
+		// Set write timeout
 		g.configMu.RLock()
 		writeTimeout := g.config.ConnectionPool.WriteTimeout
 		g.configMu.RUnlock()

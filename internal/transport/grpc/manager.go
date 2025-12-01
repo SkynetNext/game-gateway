@@ -29,10 +29,9 @@ type Manager struct {
 }
 
 type Client struct {
-	conn      *grpc.ClientConn
-	svcClient gateway.GameGatewayServiceClient // 复用 service client
-	stream    gateway.GameGatewayService_StreamPacketsClient
-	cancel    context.CancelFunc
+	conn   *grpc.ClientConn
+	stream gateway.GameGatewayService_StreamPacketsClient
+	cancel context.CancelFunc
 }
 
 func NewManager(gatewayName string, handler PacketHandler) *Manager {
@@ -51,7 +50,7 @@ func (m *Manager) Send(ctx context.Context, address string, packet *gateway.Game
 
 	err = client.stream.Send(packet)
 	if err != nil {
-		// 发送失败，可能是连接断开，清理旧连接以便下次重连
+		// Send failed, connection may be closed, clean up old connection for next reconnect
 		m.mu.Lock()
 		if c, ok := m.clients[address]; ok && c.stream == client.stream {
 			delete(m.clients, address)
@@ -96,7 +95,7 @@ func (m *Manager) getClient(ctx context.Context, address string) (*Client, error
 		attribute.String("transport", "grpc"),
 	)
 
-	// 重试逻辑：最多重试 3 次，指数退避
+	// Retry logic: maximum 3 retries with exponential backoff
 	const maxRetries = 3
 	var conn *grpc.ClientConn
 	var stream gateway.GameGatewayService_StreamPacketsClient
@@ -105,7 +104,7 @@ func (m *Manager) getClient(ctx context.Context, address string) (*Client, error
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		if attempt > 0 {
-			// 指数退避：100ms, 200ms, 400ms
+			// Exponential backoff: 100ms, 200ms, 400ms
 			backoff := time.Duration(100*(1<<uint(attempt-1))) * time.Millisecond
 			logger.Info("Retrying gRPC connection",
 				zap.String("address", address),
@@ -123,7 +122,7 @@ func (m *Manager) getClient(ctx context.Context, address string) (*Client, error
 				zap.String("address", address),
 				zap.Int("attempt", attempt+1),
 				zap.Error(err))
-			continue // 重试
+			continue // retry
 		}
 
 		svcClient := gateway.NewGameGatewayServiceClient(conn)
@@ -143,10 +142,10 @@ func (m *Manager) getClient(ctx context.Context, address string) (*Client, error
 				zap.String("address", address),
 				zap.Int("attempt", attempt+1),
 				zap.Error(err))
-			continue // 重试
+			continue // retry
 		}
 
-		// 成功，退出重试循环
+		// Success, exit retry loop
 		break
 	}
 
@@ -157,17 +156,13 @@ func (m *Manager) getClient(ctx context.Context, address string) (*Client, error
 
 	span.SetStatus(codes.Ok, "connected")
 
-	// 重新获取 service client（在循环外部）
-	svcClient := gateway.NewGameGatewayServiceClient(conn)
-
 	// Start receiving goroutine
 	go m.recvLoop(address, stream)
 
 	client = &Client{
-		conn:      conn,
-		svcClient: svcClient, // 保存 service client 供 NotifyConnect/Disconnect 复用
-		stream:    stream,
-		cancel:    cancel,
+		conn:   conn,
+		stream: stream,
+		cancel: cancel,
 	}
 	m.clients[address] = client
 
@@ -188,7 +183,7 @@ func (m *Manager) recvLoop(address string, stream gateway.GameGatewayService_Str
 	for {
 		packet, err := stream.Recv()
 		if err != nil {
-			// EOF 是正常关闭信号，不应该作为 ERROR
+			// EOF is a normal close signal, should not be treated as ERROR
 			if err == io.EOF {
 				logger.Info("gRPC stream closed by server", zap.String("address", address))
 			} else {
@@ -201,131 +196,4 @@ func (m *Manager) recvLoop(address string, stream gateway.GameGatewayService_Str
 			m.handler(packet)
 		}
 	}
-}
-
-// NotifyConnect 通知后端服务器客户端连接建立
-// 业界最佳实践：连接建立时通知一次，携带完整元数据
-func (m *Manager) NotifyConnect(ctx context.Context, address string, sessionID int64, clientIP string, protocol string) error {
-	ctx, span := tracing.StartSpan(ctx, "gateway.notify_connect")
-	defer span.End()
-
-	span.SetAttributes(
-		attribute.String("backend.address", address),
-		attribute.Int64("session.id", sessionID),
-		attribute.String("client.ip", clientIP),
-		attribute.String("protocol", protocol),
-	)
-
-	// 获取或创建 gRPC 客户端（复用已有连接，失败时自动重连）
-	client, err := m.getClient(ctx, address)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "get client failed")
-		return fmt.Errorf("failed to get client for %s: %w", address, err)
-	}
-
-	// 复用已有的 service client（避免重复创建）
-	svcClient := client.svcClient
-
-	// 添加 gate-name 元数据
-	md := metadata.Pairs("gate-name", m.gatewayName)
-	callCtx := metadata.NewOutgoingContext(ctx, md)
-
-	// 调用 NotifyConnect RPC
-	req := &gateway.ConnectRequest{
-		SessionId:   sessionID,
-		ClientIp:    clientIP,
-		Protocol:    protocol,
-		ConnectTime: time.Now().UnixMilli(),
-		Metadata:    make(map[string]string),
-	}
-
-	resp, err := svcClient.NotifyConnect(callCtx, req)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "notify connect failed")
-		logger.Error("Failed to notify connect",
-			zap.String("address", address),
-			zap.Int64("sessionID", sessionID),
-			zap.Error(err))
-		return fmt.Errorf("failed to notify connect to %s: %w", address, err)
-	}
-
-	if !resp.Success {
-		span.SetStatus(codes.Error, "connect rejected")
-		logger.Warn("Connect rejected by backend",
-			zap.String("address", address),
-			zap.Int64("sessionID", sessionID),
-			zap.String("reason", resp.Reason))
-		return fmt.Errorf("connect rejected: %s", resp.Reason)
-	}
-
-	span.SetStatus(codes.Ok, "connect notified")
-	logger.Debug("Notified backend of client connect",
-		zap.String("address", address),
-		zap.Int64("sessionID", sessionID),
-		zap.String("clientIP", clientIP))
-
-	return nil
-}
-
-// NotifyDisconnect 通知后端服务器客户端断开连接
-// 业界最佳实践：连接断开时通知，及时清理资源
-func (m *Manager) NotifyDisconnect(ctx context.Context, address string, sessionID int64, reason string) error {
-	ctx, span := tracing.StartSpan(ctx, "gateway.notify_disconnect")
-	defer span.End()
-
-	span.SetAttributes(
-		attribute.String("backend.address", address),
-		attribute.Int64("session.id", sessionID),
-		attribute.String("reason", reason),
-	)
-
-	// 获取现有客户端（断开时可能连接已关闭，所以不强制创建）
-	m.mu.RLock()
-	client, ok := m.clients[address]
-	m.mu.RUnlock()
-
-	if !ok {
-		// 连接已关闭，记录但不报错
-		logger.Debug("gRPC client already closed, skip disconnect notification",
-			zap.String("address", address),
-			zap.Int64("sessionID", sessionID))
-		return nil
-	}
-
-	// 复用已有的 service client（避免重复创建）
-	svcClient := client.svcClient
-
-	// 添加 gate-name 元数据
-	md := metadata.Pairs("gate-name", m.gatewayName)
-	callCtx := metadata.NewOutgoingContext(ctx, md)
-
-	// 调用 NotifyDisconnect RPC
-	req := &gateway.DisconnectRequest{
-		SessionId:      sessionID,
-		Reason:         reason,
-		DisconnectTime: time.Now().UnixMilli(),
-	}
-
-	resp, err := svcClient.NotifyDisconnect(callCtx, req)
-	if err != nil {
-		// 断开通知失败不是致命错误，记录日志即可
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "notify disconnect failed")
-		logger.Warn("Failed to notify disconnect",
-			zap.String("address", address),
-			zap.Int64("sessionID", sessionID),
-			zap.Error(err))
-		return nil // 不返回错误，避免影响断开流程
-	}
-
-	if resp.Acknowledged {
-		span.SetStatus(codes.Ok, "disconnect acknowledged")
-		logger.Debug("Backend acknowledged client disconnect",
-			zap.String("address", address),
-			zap.Int64("sessionID", sessionID))
-	}
-
-	return nil
 }

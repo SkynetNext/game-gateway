@@ -43,8 +43,9 @@ import (
 
 // Gateway represents the game gateway service
 type Gateway struct {
-	config  *config.Config
-	podName string
+	config      *config.Config
+	podName     string
+	gatewayName string
 
 	// Components
 	sessionManager *session.Manager
@@ -133,7 +134,6 @@ func New(cfg *config.Config, podName string) (*Gateway, error) {
 	}
 
 	if cfg.Server.UseGrpc {
-		// Determine Gateway Name: config > POD_NAME env > pod name parameter
 		gatewayName := cfg.Server.GatewayName
 		if gatewayName == "" {
 			gatewayName = os.Getenv("POD_NAME")
@@ -142,8 +142,11 @@ func New(cfg *config.Config, podName string) (*Gateway, error) {
 			gatewayName = podName
 		}
 
+		g.gatewayName = gatewayName
 		g.grpcManager = grpcmgr.NewManager(gatewayName, g.handleGrpcPacket)
 		logger.Info("gRPC transport enabled", zap.String("gateway_name", gatewayName))
+	} else {
+		g.gatewayName = podName
 	}
 
 	return g, nil
@@ -808,10 +811,10 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 	routeSpan.SetStatus(codes.Ok, "routed")
 	routeSpan.End()
 
-	// 通知后端服务器客户端已连接（业界最佳实践）
+	// Notify backend server that client has connected (best practice)
 	clientIP := extractIP(remoteAddr)
 	if err := g.notifyBackendConnect(ctx, backendAddr, sessionID, clientIP, "tcp"); err != nil {
-		// 连接通知失败，拒绝此连接
+		// Connection notification failed, reject this connection
 		connStats.status = "error"
 		connStats.errorMsg = fmt.Sprintf("notify connect failed: %v", err)
 		connStats.sessionID = sessionID
@@ -822,9 +825,9 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 	}
 
 	// Ensure connection is returned to pool even on panic
-	// 同时在连接结束时通知后端断开
+	// Also notify backend of disconnection when connection ends
 	defer func() {
-		// 通知后端服务器客户端已断开
+		// Notify backend server that client has disconnected
 		disconnectReason := "normal"
 		if connStats.status == "error" {
 			disconnectReason = connStats.errorMsg

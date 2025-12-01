@@ -5,79 +5,37 @@ package gateway;
 option go_package = "github.com/SkynetNext/game-gateway/api;gateway";
 option csharp_namespace = "Game.Networking.Grpc";
 
-// GameGatewayService 用于 Gateway 和 GameServer 之间的通信
+// GameGatewayService handles communication between Gateway and GameServer
 service GameGatewayService {
-  // StreamPackets 建立一个双向流，用于在 Gateway 和 GameServer 之间转发数据包
+  // StreamPackets establishes a bidirectional stream for forwarding packets between Gateway and GameServer
+  // Connection lifecycle events (connect/disconnect) are sent as GamePacket with metadata["packet_type"]
   rpc StreamPackets(stream GamePacket) returns (stream GamePacket);
-  
-  // NotifyConnect 当客户端连接到 Gateway 时通知 GameServer
-  // Gateway 会在客户端建立连接后立即调用此方法，携带连接元数据
-  rpc NotifyConnect(ConnectRequest) returns (ConnectResponse);
-  
-  // NotifyDisconnect 当客户端从 Gateway 断开时通知 GameServer
-  // Gateway 会在客户端断开连接后调用此方法，以便 GameServer 清理资源
-  rpc NotifyDisconnect(DisconnectRequest) returns (DisconnectResponse);
 }
 
-// GamePacket 是通用的数据包信封
+// GamePacket is a generic packet envelope for Gateway and GameServer communication
 message GamePacket {
-  // SessionID 玩家的会话ID (在 Gateway 侧唯一标识一个连接)
+  // SessionID uniquely identifies a client connection on Gateway side
   int64 session_id = 1;
 
-  // MsgID 原始的消息ID (对应 Protobuf 消息类型)
+  // MsgID is the original message ID (corresponds to Protobuf message type)
+  // For normal game messages, this is the actual message ID
+  // For connection lifecycle events, this field is ignored (use metadata instead)
   int32 msg_id = 2;
 
-  // Payload 原始的消息体二进制数据 (透传，不进行二次序列化)
+  // Payload contains the original message body binary data (passthrough, no re-serialization)
+  // Empty for connection/disconnection events
   bytes payload = 3;
   
-  // Metadata 扩展字段，用于传递 TraceContext 等元数据
+  // Metadata is used for extended fields like TraceContext and packet type
+  // For connection events, metadata must contain:
+  //   - "packet_type": "connect" or "disconnect"
+  //   - For "connect": "gateway_name", "client_ip", "protocol", "connect_time" (Unix milliseconds)
+  //   - For "disconnect": "reason", "disconnect_time" (Unix milliseconds)
+  // For normal game messages, metadata may contain:
+  //   - "trace_id": OpenTelemetry trace ID
+  //   - "span_id": OpenTelemetry span ID
   map<string, string> metadata = 4;
 
-  // 用于广播，如果此字段有值，则忽略 session_id，消息会广播给列表中的所有 session
+  // For broadcast: if this field has values, session_id is ignored and message is broadcast to all listed sessions
   repeated int64 target_session_ids = 5;
-}
-
-// ConnectRequest 客户端连接请求（Gateway → GameServer）
-message ConnectRequest {
-  // SessionID 唯一会话标识
-  int64 session_id = 1;
-  
-  // ClientIP 客户端 IP 地址
-  string client_ip = 2;
-  
-  // Protocol 连接协议类型 (tcp, websocket, http)
-  string protocol = 3;
-  
-  // ConnectTime 连接建立时间（Unix 毫秒时间戳）
-  int64 connect_time = 4;
-  
-  // Metadata 扩展元数据（可选，用于传递 User-Agent, 地域等信息）
-  map<string, string> metadata = 5;
-}
-
-// ConnectResponse 连接通知响应（GameServer → Gateway）
-message ConnectResponse {
-  // Success 是否接受此连接
-  bool success = 1;
-  
-  // Reason 拒绝原因（仅当 success=false 时有意义）
-  string reason = 2;
-}
-
-// DisconnectRequest 客户端断开请求（Gateway → GameServer）
-message DisconnectRequest {
-  // SessionID 会话标识
-  int64 session_id = 1;
-  
-  // Reason 断开原因 (normal, timeout, error)
-  string reason = 2;
-  
-  // DisconnectTime 断开时间（Unix 毫秒时间戳）
-  int64 disconnect_time = 3;
-}
-
-// DisconnectResponse 断开通知响应（GameServer → Gateway）
-message DisconnectResponse {
-  // Acknowledged 确认收到断开通知
-  bool acknowledged = 1;
 }
