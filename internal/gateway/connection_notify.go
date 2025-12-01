@@ -15,17 +15,12 @@ func (g *Gateway) notifyBackendConnect(ctx context.Context, backendAddr string, 
 		return nil
 	}
 
-	g.configMu.RLock()
-	gatewayName := g.gatewayName
-	g.configMu.RUnlock()
-
 	packet := &gateway.GamePacket{
 		SessionId: sessionID,
 		MsgId:     0,
 		Payload:   nil,
 		Metadata: map[string]string{
 			"packet_type":  "connect",
-			"gateway_name": gatewayName,
 			"client_ip":    clientIP,
 			"protocol":     protocol,
 			"connect_time": strconv.FormatInt(time.Now().UnixMilli(), 10),
@@ -64,8 +59,8 @@ func (g *Gateway) notifyBackendDisconnect(ctx context.Context, backendAddr strin
 		MsgId:     0,
 		Payload:   nil,
 		Metadata: map[string]string{
-			"packet_type":    "disconnect",
-			"reason":        reason,
+			"packet_type":     "disconnect",
+			"reason":          reason,
 			"disconnect_time": strconv.FormatInt(time.Now().UnixMilli(), 10),
 		},
 	}
@@ -85,4 +80,3 @@ func (g *Gateway) notifyBackendDisconnect(ctx context.Context, backendAddr strin
 		zap.Int64("sessionID", sessionID),
 		zap.String("reason", reason))
 }
-

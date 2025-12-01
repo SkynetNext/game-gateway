@@ -16,6 +16,33 @@ import (
 
 // handleGrpcPacket handles packets received from GameServer via gRPC
 func (g *Gateway) handleGrpcPacket(packet *gateway.GamePacket) {
+	// Handle connection lifecycle events (packet_type in metadata)
+	if packet.Metadata != nil {
+		if packetType, ok := packet.Metadata["packet_type"]; ok {
+			switch packetType {
+			case "server_connect":
+				// GameServer accepted connection (login response)
+				// Gateway doesn't need to do anything special, just log it
+				if packet.SessionId > 0 {
+					reason := "login_accepted"
+					if r, ok := packet.Metadata["reason"]; ok {
+						reason = r
+					}
+					logger.Debug("server_connect: connection accepted by GameServer",
+						zap.Int64("session_id", packet.SessionId),
+						zap.String("reason", reason))
+				}
+				return
+			case "server_disconnect":
+				// GameServer-initiated disconnect: close the client connection
+				if packet.SessionId > 0 {
+					g.handleServerDisconnect(packet.SessionId, packet.Metadata)
+				}
+				return
+			}
+		}
+	}
+
 	// Handle broadcast packets
 	if len(packet.TargetSessionIds) > 0 {
 		for _, sessID := range packet.TargetSessionIds {
@@ -28,6 +55,32 @@ func (g *Gateway) handleGrpcPacket(packet *gateway.GamePacket) {
 	if packet.SessionId > 0 {
 		g.sendToSession(packet.SessionId, packet)
 	}
+}
+
+// handleServerDisconnect handles server-initiated disconnect requests
+func (g *Gateway) handleServerDisconnect(sessionID int64, metadata map[string]string) {
+	sess, ok := g.sessionManager.Get(sessionID)
+	if !ok || sess == nil {
+		logger.Debug("server_disconnect: session not found", zap.Int64("session_id", sessionID))
+		return
+	}
+
+	reason := "server_initiated"
+	if r, ok := metadata["reason"]; ok {
+		reason = r
+	}
+
+	logger.Info("server_disconnect: closing client connection",
+		zap.Int64("session_id", sessionID),
+		zap.String("reason", reason))
+
+	// Close client connection
+	if sess.ClientConn != nil {
+		sess.ClientConn.Close()
+	}
+
+	// Remove session
+	g.sessionManager.Remove(sessionID)
 }
 
 func (g *Gateway) sendToSession(sessionID int64, packet *gateway.GamePacket) {

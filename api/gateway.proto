@@ -27,11 +27,13 @@ message GamePacket {
   bytes payload = 3;
   
   // Metadata is used for extended fields like TraceContext and packet type
-  // For connection events, metadata must contain:
-  //   - "packet_type": "connect" or "disconnect"
-  //   - For "connect": "client_ip", "protocol", "connect_time" (Unix milliseconds)
+  // For connection lifecycle events, metadata must contain:
+  //   - "packet_type": "connect", "disconnect", "server_connect", or "server_disconnect"
+  //   - For "connect" (Gateway → GameServer): "client_ip", "protocol", "connect_time" (Unix milliseconds)
   //     Note: gateway_name is obtained from gRPC header during stream establishment, not from packet metadata
-  //   - For "disconnect": "reason", "disconnect_time" (Unix milliseconds)
+  //   - For "disconnect" (Gateway → GameServer, client-initiated): "reason", "disconnect_time" (Unix milliseconds)
+  //   - For "server_connect" (GameServer → Gateway, login accepted): "reason", "connect_time" (Unix milliseconds)
+  //   - For "server_disconnect" (GameServer → Gateway, server-initiated): "reason", "disconnect_time" (Unix milliseconds)
   // For normal game messages, metadata may contain:
   //   - "trace_id": OpenTelemetry trace ID
   //   - "span_id": OpenTelemetry span ID
