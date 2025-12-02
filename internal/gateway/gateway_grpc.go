@@ -67,7 +67,13 @@ func (g *Gateway) handleGrpcPacket(packet *gateway.GamePacket) {
 				zap.Int64("session_id", packet.SessionId),
 				zap.Int32("msg_id", packet.MsgId))
 		}
+		logger.Debug("handleGrpcPacket: about to call sendToSession",
+			zap.Int64("session_id", packet.SessionId),
+			zap.Int32("msg_id", packet.MsgId)) // DEBUG
 		g.sendToSession(packet.SessionId, packet)
+		logger.Debug("handleGrpcPacket: sendToSession returned",
+			zap.Int64("session_id", packet.SessionId),
+			zap.Int32("msg_id", packet.MsgId)) // DEBUG
 	}
 }
 
@@ -98,6 +104,12 @@ func (g *Gateway) handleServerDisconnect(sessionID int64, metadata map[string]st
 }
 
 func (g *Gateway) sendToSession(sessionID int64, packet *gateway.GamePacket) {
+	// 添加入口日志，确认函数被调用
+	logger.Debug("sendToSession: entry",
+		zap.Int64("session_id", sessionID),
+		zap.Int32("msg_id", packet.MsgId),
+		zap.Int("payload_size", len(packet.Payload)))
+
 	sess, ok := g.sessionManager.Get(sessionID)
 	if !ok || sess == nil {
 		// Log when session not found - this helps diagnose why packets aren't being forwarded
