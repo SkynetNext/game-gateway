@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/binary"
 	"sync/atomic"
 	"time"
 
@@ -104,8 +105,6 @@ func (g *Gateway) sendToSession(sessionID int64, packet *gateway.GamePacket) {
 
 	sess.ClientConn.SetWriteDeadline(time.Now().Add(writeTimeout))
 
-	logger.Debug("sendToSession: writing client header", zap.Int64("session_id", sessionID), zap.Int32("msg_id", packet.MsgId), zap.Int32("payload_size", (int32)(len(packet.Payload))))
-
 	// Write ClientMessageHeader (8 bytes) before sending payload
 	clientHeader := &protocol.ClientMessageHeader{
 		Length:    uint16(len(packet.Payload)),
@@ -120,25 +119,84 @@ func (g *Gateway) sendToSession(sessionID int64, packet *gateway.GamePacket) {
 		zap.Uint32("header_server_id", clientHeader.ServerID),
 		zap.Int("payload_size", len(packet.Payload)))
 
-	if err := protocol.WriteClientMessageHeader(sess.ClientConn, clientHeader); err != nil {
-		logger.Debug("failed to write client header", zap.Int64("session_id", sessionID), zap.Error(err))
-		return
-	}
+	// Handle WebSocket vs TCP differently
+	// WebSocket: combine header + payload into one binary frame
+	// TCP: write header and payload separately (both are raw bytes)
+	if wsConn, ok := sess.ClientConn.(*protocol.WebSocketConn); ok {
+		// WebSocket: combine header + payload, send as one binary frame
+		headerBuf := make([]byte, protocol.ClientMessageHeaderSize)
+		binary.LittleEndian.PutUint16(headerBuf[0:2], clientHeader.Length)
+		binary.LittleEndian.PutUint16(headerBuf[2:4], clientHeader.MessageID)
+		binary.LittleEndian.PutUint32(headerBuf[4:8], clientHeader.ServerID)
 
-	// Write payload
-	if len(packet.Payload) > 0 {
-		n, err := sess.ClientConn.Write(packet.Payload)
-		if err != nil {
-			logger.Debug("failed to write payload to client session", zap.Int64("session_id", sessionID), zap.Error(err))
-			return
-		} else if sess.BytesOut != nil {
-			// Update bytesOut counter (for access log statistics)
-			// Include header size (8 bytes) + payload size
-			atomic.AddInt64(sess.BytesOut, int64(8+n))
+		// Combine header and payload
+		fullMessage := make([]byte, len(headerBuf)+len(packet.Payload))
+		copy(fullMessage[0:8], headerBuf)
+		if len(packet.Payload) > 0 {
+			copy(fullMessage[8:], packet.Payload)
 		}
-	} else if sess.BytesOut != nil {
-		// Even if payload is empty, we still wrote the header (8 bytes)
-		atomic.AddInt64(sess.BytesOut, 8)
+
+		logger.Debug("sendToSession: writing packet payload to client (WebSocket)",
+			zap.Int64("session_id", sessionID),
+			zap.Int32("msg_id", packet.MsgId),
+			zap.Int("payload_length", len(packet.Payload)),
+			zap.Int("total_message_length", len(fullMessage)))
+
+		// Send as one WebSocket binary frame
+		n, err := wsConn.Write(fullMessage)
+		if err != nil {
+			logger.Debug("failed to write WebSocket frame to client session",
+				zap.Int64("session_id", sessionID), zap.Error(err))
+			return
+		}
+
+		if sess.BytesOut != nil {
+			atomic.AddInt64(sess.BytesOut, int64(n))
+		}
+
+		logger.Debug("sendToSession: successfully sent packet to client (WebSocket)",
+			zap.Int64("session_id", sessionID),
+			zap.Int32("msg_id", packet.MsgId),
+			zap.Int("bytes_sent", n))
+	} else {
+		// TCP: write header and payload separately
+		if err := protocol.WriteClientMessageHeader(sess.ClientConn, clientHeader); err != nil {
+			logger.Debug("failed to write client header", zap.Int64("session_id", sessionID), zap.Error(err))
+			return
+		}
+
+		// Write payload
+		if len(packet.Payload) > 0 {
+			logger.Debug("sendToSession: writing packet payload to client (TCP)",
+				zap.Int64("session_id", sessionID),
+				zap.Int32("msg_id", packet.MsgId),
+				zap.Int("payload_length", len(packet.Payload)))
+
+			n, err := sess.ClientConn.Write(packet.Payload)
+			if err != nil {
+				logger.Debug("failed to write payload to client session", zap.Int64("session_id", sessionID), zap.Error(err))
+				return
+			} else if sess.BytesOut != nil {
+				// Update bytesOut counter (for access log statistics)
+				// Include header size (8 bytes) + payload size
+				atomic.AddInt64(sess.BytesOut, int64(8+n))
+			}
+
+			logger.Debug("sendToSession: successfully sent packet to client (TCP)",
+				zap.Int64("session_id", sessionID),
+				zap.Int32("msg_id", packet.MsgId),
+				zap.Int("header_bytes", 8),
+				zap.Int("payload_bytes", n),
+				zap.Int("total_bytes", 8+n))
+		} else if sess.BytesOut != nil {
+			// Even if payload is empty, we still wrote the header (8 bytes)
+			atomic.AddInt64(sess.BytesOut, 8)
+
+			logger.Debug("sendToSession: successfully sent packet to client (TCP, empty payload)",
+				zap.Int64("session_id", sessionID),
+				zap.Int32("msg_id", packet.MsgId),
+				zap.Int("header_bytes", 8))
+		}
 	}
 }
 

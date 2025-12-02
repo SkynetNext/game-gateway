@@ -53,13 +53,17 @@ func (m *Manager) Send(ctx context.Context, address string, packet *gateway.Game
 
 	err = client.stream.Send(packet)
 	if err != nil {
-		// Send failed, connection may be closed, clean up old connection for next reconnect
-		// Use LoadAndDelete to atomically check and remove the client
-		if actualClient, loaded := m.clients.LoadAndDelete(address); loaded {
-			if c, ok := actualClient.(*Client); ok && c.stream == client.stream {
-				c.conn.Close()
-				c.cancel()
-			}
+		// Send failed, connection may be closed
+		// Use CompareAndDelete to safely remove only if it's still the same client
+		// This prevents race conditions where another goroutine might be using the client
+		if m.clients.CompareAndDelete(address, client) {
+			// Successfully deleted, safe to close
+			client.conn.Close()
+			client.cancel()
+		} else {
+			// Another goroutine might have replaced it, just log
+			logger.Debug("gRPC send failed, client was already replaced",
+				zap.String("address", address))
 		}
 
 		logger.Warn("gRPC send failed, connection will be recreated on next send",
@@ -180,11 +184,15 @@ func (m *Manager) getClient(ctx context.Context, address string) (*Client, error
 
 func (m *Manager) recvLoop(address string, stream gateway.GameGatewayService_StreamPacketsClient) {
 	defer func() {
-		// Use LoadAndDelete to atomically check and remove the client
-		if actualClient, loaded := m.clients.LoadAndDelete(address); loaded {
+		// First load the client to check if it matches our stream
+		if actualClient, loaded := m.clients.Load(address); loaded {
 			if client, ok := actualClient.(*Client); ok && client.stream == stream {
-				client.conn.Close()
-				client.cancel()
+				// Use CompareAndDelete to safely remove only if it's still the same client
+				// This prevents deleting a client that was replaced by another goroutine
+				if m.clients.CompareAndDelete(address, client) {
+					client.conn.Close()
+					client.cancel()
+				}
 			}
 		}
 	}()
