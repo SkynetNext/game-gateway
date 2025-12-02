@@ -124,7 +124,7 @@ metadata:
 spec:
   type: NodePort
   # Local traffic policy: avoid cross-node forwarding
-  externalTrafficPolicy: Local
+  # externalTrafficPolicy: Local
   selector:
     app: game-gateway
   ports:
