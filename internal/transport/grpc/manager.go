@@ -217,8 +217,21 @@ func (m *Manager) recvLoop(address string, stream gateway.GameGatewayService_Str
 							zap.Int32("msg_id", packet.MsgId))
 					}
 				}()
+				logger.Debug("recvLoop: calling handler",
+					zap.String("address", address),
+					zap.Int64("session_id", packet.SessionId),
+					zap.Int32("msg_id", packet.MsgId))
 				m.handler(packet)
+				logger.Debug("recvLoop: handler returned",
+					zap.String("address", address),
+					zap.Int64("session_id", packet.SessionId),
+					zap.Int32("msg_id", packet.MsgId))
 			}()
+		} else {
+			logger.Warn("recvLoop: handler is nil, packet not processed",
+				zap.String("address", address),
+				zap.Int64("session_id", packet.SessionId),
+				zap.Int32("msg_id", packet.MsgId))
 		}
 	}
 }

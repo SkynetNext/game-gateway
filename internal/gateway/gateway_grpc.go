@@ -16,6 +16,13 @@ import (
 
 // handleGrpcPacket handles packets received from GameServer via gRPC
 func (g *Gateway) handleGrpcPacket(packet *gateway.GamePacket) {
+	// Log entry to confirm this function is being called
+	logger.Debug("handleGrpcPacket: entry",
+		zap.Int64("session_id", packet.SessionId),
+		zap.Int32("msg_id", packet.MsgId),
+		zap.Int("payload_size", len(packet.Payload)),
+		zap.Int("metadata_count", len(packet.Metadata)))
+
 	// Handle connection lifecycle events (packet_type in metadata)
 	if packet.Metadata != nil {
 		if packetType, ok := packet.Metadata["packet_type"]; ok {
@@ -53,6 +60,13 @@ func (g *Gateway) handleGrpcPacket(packet *gateway.GamePacket) {
 
 	// Handle unicast packets
 	if packet.SessionId > 0 {
+		// Log if payload is empty (0 bytes) for normal game messages
+		// This helps diagnose issues where GameServer sends empty packets
+		if len(packet.Payload) == 0 {
+			logger.Debug("handleGrpcPacket: received packet with empty payload",
+				zap.Int64("session_id", packet.SessionId),
+				zap.Int32("msg_id", packet.MsgId))
+		}
 		g.sendToSession(packet.SessionId, packet)
 	}
 }
@@ -86,23 +100,41 @@ func (g *Gateway) handleServerDisconnect(sessionID int64, metadata map[string]st
 func (g *Gateway) sendToSession(sessionID int64, packet *gateway.GamePacket) {
 	sess, ok := g.sessionManager.Get(sessionID)
 	if !ok || sess == nil {
+		// Log when session not found - this helps diagnose why packets aren't being forwarded
+		// Use Info level so it's visible in production logs
+		logger.Info("sendToSession: session not found, cannot forward packet",
+			zap.Int64("session_id", sessionID),
+			zap.Int32("msg_id", packet.MsgId),
+			zap.Int("payload_size", len(packet.Payload)))
 		return
 	}
 
-	if sess.ClientConn != nil {
-		// Set write timeout
-		g.configMu.RLock()
-		writeTimeout := g.config.ConnectionPool.WriteTimeout
-		g.configMu.RUnlock()
+	if sess.ClientConn == nil {
+		logger.Info("sendToSession: session exists but ClientConn is nil",
+			zap.Int64("session_id", sessionID),
+			zap.Int32("msg_id", packet.MsgId))
+		return
+	}
 
-		sess.ClientConn.SetWriteDeadline(time.Now().Add(writeTimeout))
-		n, err := sess.ClientConn.Write(packet.Payload)
-		if err != nil {
-			logger.Debug("failed to write to client session", zap.Int64("session_id", sessionID), zap.Error(err))
-		} else if sess.BytesOut != nil {
-			// Update bytesOut counter (for access log statistics)
-			atomic.AddInt64(sess.BytesOut, int64(n))
-		}
+	// Log if payload is empty (0 bytes) - some messages may have no body, but we still forward them
+	if len(packet.Payload) == 0 {
+		logger.Debug("sendToSession: forwarding packet with empty payload",
+			zap.Int64("session_id", sessionID),
+			zap.Int32("msg_id", packet.MsgId))
+	}
+
+	// Set write timeout
+	g.configMu.RLock()
+	writeTimeout := g.config.ConnectionPool.WriteTimeout
+	g.configMu.RUnlock()
+
+	sess.ClientConn.SetWriteDeadline(time.Now().Add(writeTimeout))
+	n, err := sess.ClientConn.Write(packet.Payload)
+	if err != nil {
+		logger.Debug("failed to write to client session", zap.Int64("session_id", sessionID), zap.Error(err))
+	} else if sess.BytesOut != nil {
+		// Update bytesOut counter (for access log statistics)
+		atomic.AddInt64(sess.BytesOut, int64(n))
 	}
 }
 
