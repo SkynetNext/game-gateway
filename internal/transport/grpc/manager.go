@@ -192,21 +192,11 @@ func (m *Manager) recvLoop(address string, stream gateway.GameGatewayService_Str
 			return
 		}
 
-		// Log received packet for debugging
-		logger.Info("Received packet from GameServer",
-			zap.String("address", address),
-			zap.Int64("session_id", packet.SessionId),
-			zap.Int32("msg_id", packet.MsgId),
-			zap.Int("payload_size", len(packet.Payload)),
-			zap.Int("metadata_count", len(packet.Metadata)),
-			zap.Int("target_session_ids_count", len(packet.TargetSessionIds)))
-
 		if m.handler != nil {
 			// Protect handler execution with recover to prevent panic from terminating the recvLoop.
 			// Without this protection, if handler panics, the entire recvLoop goroutine exits,
 			// causing the defer cleanup to close the connection and stream, which prevents
-			// receiving any subsequent packets. This is why we only see one log entry before
-			// the gateway stops receiving packets.
+			// receiving any subsequent packets.
 			func() {
 				defer func() {
 					if r := recover(); r != nil {
@@ -217,15 +207,7 @@ func (m *Manager) recvLoop(address string, stream gateway.GameGatewayService_Str
 							zap.Int32("msg_id", packet.MsgId))
 					}
 				}()
-				logger.Debug("recvLoop: calling handler",
-					zap.String("address", address),
-					zap.Int64("session_id", packet.SessionId),
-					zap.Int32("msg_id", packet.MsgId))
 				m.handler(packet)
-				logger.Debug("recvLoop: handler returned",
-					zap.String("address", address),
-					zap.Int64("session_id", packet.SessionId),
-					zap.Int32("msg_id", packet.MsgId))
 			}()
 		} else {
 			logger.Warn("recvLoop: handler is nil, packet not processed",

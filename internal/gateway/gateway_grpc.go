@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/binary"
 	"sync/atomic"
 	"time"
 
@@ -16,29 +17,13 @@ import (
 
 // handleGrpcPacket handles packets received from GameServer via gRPC
 func (g *Gateway) handleGrpcPacket(packet *gateway.GamePacket) {
-	// Log entry to confirm this function is being called
-	logger.Debug("handleGrpcPacket: entry",
-		zap.Int64("session_id", packet.SessionId),
-		zap.Int32("msg_id", packet.MsgId),
-		zap.Int("payload_size", len(packet.Payload)),
-		zap.Int("metadata_count", len(packet.Metadata)))
-
 	// Handle connection lifecycle events (packet_type in metadata)
 	if packet.Metadata != nil {
 		if packetType, ok := packet.Metadata["packet_type"]; ok {
 			switch packetType {
 			case "server_connect":
 				// GameServer accepted connection (login response)
-				// Gateway doesn't need to do anything special, just log it
-				if packet.SessionId > 0 {
-					reason := "login_accepted"
-					if r, ok := packet.Metadata["reason"]; ok {
-						reason = r
-					}
-					logger.Debug("server_connect: connection accepted by GameServer",
-						zap.Int64("session_id", packet.SessionId),
-						zap.String("reason", reason))
-				}
+				// Gateway doesn't need to do anything special, just return
 				return
 			case "server_disconnect":
 				// GameServer-initiated disconnect: close the client connection
@@ -60,20 +45,7 @@ func (g *Gateway) handleGrpcPacket(packet *gateway.GamePacket) {
 
 	// Handle unicast packets
 	if packet.SessionId > 0 {
-		// Log if payload is empty (0 bytes) for normal game messages
-		// This helps diagnose issues where GameServer sends empty packets
-		if len(packet.Payload) == 0 {
-			logger.Debug("handleGrpcPacket: received packet with empty payload",
-				zap.Int64("session_id", packet.SessionId),
-				zap.Int32("msg_id", packet.MsgId))
-		}
-		logger.Debug("handleGrpcPacket: about to call sendToSession",
-			zap.Int64("session_id", packet.SessionId),
-			zap.Int32("msg_id", packet.MsgId)) // DEBUG
 		g.sendToSession(packet.SessionId, packet)
-		logger.Debug("handleGrpcPacket: sendToSession returned",
-			zap.Int64("session_id", packet.SessionId),
-			zap.Int32("msg_id", packet.MsgId)) // DEBUG
 	}
 }
 
@@ -81,7 +53,6 @@ func (g *Gateway) handleGrpcPacket(packet *gateway.GamePacket) {
 func (g *Gateway) handleServerDisconnect(sessionID int64, metadata map[string]string) {
 	sess, ok := g.sessionManager.Get(sessionID)
 	if !ok || sess == nil {
-		logger.Debug("server_disconnect: session not found", zap.Int64("session_id", sessionID))
 		return
 	}
 
@@ -104,16 +75,9 @@ func (g *Gateway) handleServerDisconnect(sessionID int64, metadata map[string]st
 }
 
 func (g *Gateway) sendToSession(sessionID int64, packet *gateway.GamePacket) {
-	// 添加入口日志，确认函数被调用
-	logger.Debug("sendToSession: entry",
-		zap.Int64("session_id", sessionID),
-		zap.Int32("msg_id", packet.MsgId),
-		zap.Int("payload_size", len(packet.Payload)))
-
 	sess, ok := g.sessionManager.Get(sessionID)
 	if !ok || sess == nil {
 		// Log when session not found - this helps diagnose why packets aren't being forwarded
-		// Use Info level so it's visible in production logs
 		logger.Info("sendToSession: session not found, cannot forward packet",
 			zap.Int64("session_id", sessionID),
 			zap.Int32("msg_id", packet.MsgId),
@@ -128,25 +92,49 @@ func (g *Gateway) sendToSession(sessionID int64, packet *gateway.GamePacket) {
 		return
 	}
 
-	// Log if payload is empty (0 bytes) - some messages may have no body, but we still forward them
-	if len(packet.Payload) == 0 {
-		logger.Debug("sendToSession: forwarding packet with empty payload",
-			zap.Int64("session_id", sessionID),
-			zap.Int32("msg_id", packet.MsgId))
-	}
-
 	// Set write timeout
 	g.configMu.RLock()
 	writeTimeout := g.config.ConnectionPool.WriteTimeout
 	g.configMu.RUnlock()
 
 	sess.ClientConn.SetWriteDeadline(time.Now().Add(writeTimeout))
-	n, err := sess.ClientConn.Write(packet.Payload)
-	if err != nil {
-		logger.Debug("failed to write to client session", zap.Int64("session_id", sessionID), zap.Error(err))
+
+	// Construct ClientMessageHeader (8 bytes) before sending payload
+	// This matches the format expected by the client (same as TCP mode)
+	clientHeader := protocol.ClientMessageHeader{
+		Length:    uint16(len(packet.Payload)),
+		MessageID: uint16(packet.MsgId),
+		ServerID:  0, // ServerID is 0 for server-to-client messages (same as TCP mode)
+	}
+
+	// Write ClientMessageHeader (8 bytes, Little Endian)
+	if err := binary.Write(sess.ClientConn, binary.LittleEndian, clientHeader.Length); err != nil {
+		logger.Debug("failed to write client header length", zap.Int64("session_id", sessionID), zap.Error(err))
+		return
+	}
+	if err := binary.Write(sess.ClientConn, binary.LittleEndian, clientHeader.MessageID); err != nil {
+		logger.Debug("failed to write client header messageID", zap.Int64("session_id", sessionID), zap.Error(err))
+		return
+	}
+	if err := binary.Write(sess.ClientConn, binary.LittleEndian, clientHeader.ServerID); err != nil {
+		logger.Debug("failed to write client header serverID", zap.Int64("session_id", sessionID), zap.Error(err))
+		return
+	}
+
+	// Write payload
+	if len(packet.Payload) > 0 {
+		n, err := sess.ClientConn.Write(packet.Payload)
+		if err != nil {
+			logger.Debug("failed to write payload to client session", zap.Int64("session_id", sessionID), zap.Error(err))
+			return
+		} else if sess.BytesOut != nil {
+			// Update bytesOut counter (for access log statistics)
+			// Include header size (8 bytes) + payload size
+			atomic.AddInt64(sess.BytesOut, int64(8+n))
+		}
 	} else if sess.BytesOut != nil {
-		// Update bytesOut counter (for access log statistics)
-		atomic.AddInt64(sess.BytesOut, int64(n))
+		// Even if payload is empty, we still wrote the header (8 bytes)
+		atomic.AddInt64(sess.BytesOut, 8)
 	}
 }
 
