@@ -16,6 +16,12 @@ import (
 
 // handleGrpcPacket handles packets received from GameServer via gRPC
 func (g *Gateway) handleGrpcPacket(packet *gateway.GamePacket) {
+	logger.Debug("handleGrpcPacket: received packet from gRPC",
+		zap.Int64("session_id", packet.SessionId),
+		zap.Int32("msg_id", packet.MsgId),
+		zap.Int("payload_size", int(len(packet.Payload))),
+		zap.Int("target_session_ids_count", len(packet.TargetSessionIds)))
+
 	// Handle connection lifecycle events (packet_type in metadata)
 	if packet.Metadata != nil {
 		if packetType, ok := packet.Metadata["packet_type"]; ok {
@@ -98,12 +104,22 @@ func (g *Gateway) sendToSession(sessionID int64, packet *gateway.GamePacket) {
 
 	sess.ClientConn.SetWriteDeadline(time.Now().Add(writeTimeout))
 
+	logger.Debug("sendToSession: writing client header", zap.Int64("session_id", sessionID), zap.Int32("msg_id", packet.MsgId), zap.Int32("payload_size", (int32)(len(packet.Payload))))
+
 	// Write ClientMessageHeader (8 bytes) before sending payload
 	clientHeader := &protocol.ClientMessageHeader{
 		Length:    uint16(len(packet.Payload)),
 		MessageID: uint16(packet.MsgId),
 		ServerID:  0, // ServerID is 0 for server-to-client messages (same as TCP mode)
 	}
+
+	logger.Debug("sendToSession: writing packet header to client",
+		zap.Int64("session_id", sessionID),
+		zap.Uint16("header_length", clientHeader.Length),
+		zap.Uint16("header_message_id", clientHeader.MessageID),
+		zap.Uint32("header_server_id", clientHeader.ServerID),
+		zap.Int("payload_size", len(packet.Payload)))
+
 	if err := protocol.WriteClientMessageHeader(sess.ClientConn, clientHeader); err != nil {
 		logger.Debug("failed to write client header", zap.Int64("session_id", sessionID), zap.Error(err))
 		return

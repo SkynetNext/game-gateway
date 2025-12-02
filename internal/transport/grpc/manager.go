@@ -21,8 +21,12 @@ import (
 type PacketHandler func(packet *gateway.GamePacket)
 
 type Manager struct {
-	mu      sync.RWMutex
-	clients map[string]*Client // address -> client
+	// Use sync.Map instead of map + RWMutex for better concurrent read performance.
+	// sync.Map is optimized for cases where:
+	// - Reads are much more common than writes
+	// - Multiple goroutines read/write different keys
+	// - We don't need to iterate over all entries
+	clients sync.Map // address -> *Client
 
 	gatewayName string // Pod Name (e.g., "game-gateway-7d8f9c-abc12")
 	handler     PacketHandler
@@ -36,7 +40,6 @@ type Client struct {
 
 func NewManager(gatewayName string, handler PacketHandler) *Manager {
 	return &Manager{
-		clients:     make(map[string]*Client),
 		gatewayName: gatewayName,
 		handler:     handler,
 	}
@@ -51,13 +54,13 @@ func (m *Manager) Send(ctx context.Context, address string, packet *gateway.Game
 	err = client.stream.Send(packet)
 	if err != nil {
 		// Send failed, connection may be closed, clean up old connection for next reconnect
-		m.mu.Lock()
-		if c, ok := m.clients[address]; ok && c.stream == client.stream {
-			delete(m.clients, address)
-			c.conn.Close()
-			c.cancel()
+		// Use LoadAndDelete to atomically check and remove the client
+		if actualClient, loaded := m.clients.LoadAndDelete(address); loaded {
+			if c, ok := actualClient.(*Client); ok && c.stream == client.stream {
+				c.conn.Close()
+				c.cancel()
+			}
 		}
-		m.mu.Unlock()
 
 		logger.Warn("gRPC send failed, connection will be recreated on next send",
 			zap.String("address", address),
@@ -69,21 +72,16 @@ func (m *Manager) Send(ctx context.Context, address string, packet *gateway.Game
 }
 
 func (m *Manager) getClient(ctx context.Context, address string) (*Client, error) {
-	m.mu.RLock()
-	client, ok := m.clients[address]
-	m.mu.RUnlock()
-
-	if ok {
-		return client, nil
+	// Fast path: check if client already exists (lock-free read with sync.Map)
+	if actualClient, ok := m.clients.Load(address); ok {
+		if client, ok := actualClient.(*Client); ok {
+			return client, nil
+		}
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Double check
-	if client, ok = m.clients[address]; ok {
-		return client, nil
-	}
+	// Slow path: need to create new client
+	// Use LoadOrStore to handle race condition where multiple goroutines try to create the same client
+	// This eliminates the need for double-checked locking pattern
 
 	// Create span for gRPC connection establishment
 	spanCtx, span := tracing.StartSpan(ctx, "gateway.grpc_connect")
@@ -159,25 +157,36 @@ func (m *Manager) getClient(ctx context.Context, address string) (*Client, error
 	// Start receiving goroutine
 	go m.recvLoop(address, stream)
 
-	client = &Client{
+	client := &Client{
 		conn:   conn,
 		stream: stream,
 		cancel: cancel,
 	}
-	m.clients[address] = client
+
+	// Use LoadOrStore to atomically store the client, or return existing one if another goroutine created it
+	actualClient, loaded := m.clients.LoadOrStore(address, client)
+	if loaded {
+		// Another goroutine already created a client for this address
+		// Close our newly created connection and use the existing one
+		conn.Close()
+		cancel()
+		if existingClient, ok := actualClient.(*Client); ok {
+			return existingClient, nil
+		}
+	}
 
 	return client, nil
 }
 
 func (m *Manager) recvLoop(address string, stream gateway.GameGatewayService_StreamPacketsClient) {
 	defer func() {
-		m.mu.Lock()
-		if client, ok := m.clients[address]; ok && client.stream == stream {
-			delete(m.clients, address)
-			client.conn.Close()
-			client.cancel()
+		// Use LoadAndDelete to atomically check and remove the client
+		if actualClient, loaded := m.clients.LoadAndDelete(address); loaded {
+			if client, ok := actualClient.(*Client); ok && client.stream == stream {
+				client.conn.Close()
+				client.cancel()
+			}
 		}
-		m.mu.Unlock()
 	}()
 
 	for {
@@ -191,6 +200,14 @@ func (m *Manager) recvLoop(address string, stream gateway.GameGatewayService_Str
 			}
 			return
 		}
+
+		logger.Debug("gRPC recv packet",
+			zap.String("address", address),
+			zap.Int64("session_id", packet.SessionId),
+			zap.Int32("msg_id", packet.MsgId),
+			zap.Any("metadata", packet.Metadata),
+			zap.Int32("payload_size", int32(len(packet.Payload))),
+		)
 
 		if m.handler != nil {
 			// Protect handler execution with recover to prevent panic from terminating the recvLoop.
