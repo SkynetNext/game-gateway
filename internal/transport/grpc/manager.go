@@ -193,7 +193,7 @@ func (m *Manager) recvLoop(address string, stream gateway.GameGatewayService_Str
 		}
 
 		// Log received packet for debugging
-		logger.Debug("Received packet from GameServer",
+		logger.Info("Received packet from GameServer",
 			zap.String("address", address),
 			zap.Int64("session_id", packet.SessionId),
 			zap.Int32("msg_id", packet.MsgId),
