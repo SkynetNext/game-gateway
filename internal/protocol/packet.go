@@ -89,6 +89,20 @@ func ParseClientMessageHeader(r io.Reader) (*ClientMessageHeader, error) {
 	return header, nil
 }
 
+// WriteClientMessageHeader writes client message header to writer (8 bytes, Little Endian)
+// Optimized: constructs header buffer in one allocation and writes in one operation
+func WriteClientMessageHeader(w io.Writer, header *ClientMessageHeader) error {
+	// Construct 8-byte header buffer
+	headerBuf := make([]byte, ClientMessageHeaderSize)
+	binary.LittleEndian.PutUint16(headerBuf[0:2], header.Length)
+	binary.LittleEndian.PutUint16(headerBuf[2:4], header.MessageID)
+	binary.LittleEndian.PutUint32(headerBuf[4:8], header.ServerID)
+
+	// Write header in one operation
+	_, err := w.Write(headerBuf)
+	return err
+}
+
 // ExtractServerIDInfo extracts routing information from ServerID
 func ExtractServerIDInfo(serverID uint32) (isZip bool, worldID uint16, serverType uint8, instID uint8) {
 	isZip = (serverID & 0x80000000) != 0

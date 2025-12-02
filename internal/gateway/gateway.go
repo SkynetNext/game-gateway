@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/base64"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash/crc32"
@@ -1143,24 +1142,16 @@ func (g *Gateway) forwardConnection(ctx context.Context, sess *session.Session, 
 				return
 			}
 
-			clientHeader := protocol.ClientMessageHeader{
-				Length:    uint16(messageDataLen),
+			// Write ClientMessageHeader (8 bytes) before sending payload
+			// Use actual payload length (len(messageData)) instead of calculated messageDataLen
+			// to ensure accuracy regardless of how serverHeader.Length was calculated
+			payloadLen := len(messageData)
+			clientHeader := &protocol.ClientMessageHeader{
+				Length:    uint16(payloadLen),
 				MessageID: uint16(serverHeader.Type),
-				ServerID:  0,
+				ServerID:  0, // ServerID is 0 for server-to-client messages
 			}
-			if err := binary.Write(sess.ClientConn, binary.LittleEndian, clientHeader.Length); err != nil {
-				if pooledBuf != nil {
-					buffer.Put(pooledBuf)
-				}
-				return
-			}
-			if err := binary.Write(sess.ClientConn, binary.LittleEndian, clientHeader.MessageID); err != nil {
-				if pooledBuf != nil {
-					buffer.Put(pooledBuf)
-				}
-				return
-			}
-			if err := binary.Write(sess.ClientConn, binary.LittleEndian, clientHeader.ServerID); err != nil {
+			if err := protocol.WriteClientMessageHeader(sess.ClientConn, clientHeader); err != nil {
 				if pooledBuf != nil {
 					buffer.Put(pooledBuf)
 				}

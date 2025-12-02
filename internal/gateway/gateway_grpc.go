@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"context"
-	"encoding/binary"
 	"sync/atomic"
 	"time"
 
@@ -99,25 +98,14 @@ func (g *Gateway) sendToSession(sessionID int64, packet *gateway.GamePacket) {
 
 	sess.ClientConn.SetWriteDeadline(time.Now().Add(writeTimeout))
 
-	// Construct ClientMessageHeader (8 bytes) before sending payload
-	// This matches the format expected by the client (same as TCP mode)
-	clientHeader := protocol.ClientMessageHeader{
+	// Write ClientMessageHeader (8 bytes) before sending payload
+	clientHeader := &protocol.ClientMessageHeader{
 		Length:    uint16(len(packet.Payload)),
 		MessageID: uint16(packet.MsgId),
 		ServerID:  0, // ServerID is 0 for server-to-client messages (same as TCP mode)
 	}
-
-	// Write ClientMessageHeader (8 bytes, Little Endian)
-	if err := binary.Write(sess.ClientConn, binary.LittleEndian, clientHeader.Length); err != nil {
-		logger.Debug("failed to write client header length", zap.Int64("session_id", sessionID), zap.Error(err))
-		return
-	}
-	if err := binary.Write(sess.ClientConn, binary.LittleEndian, clientHeader.MessageID); err != nil {
-		logger.Debug("failed to write client header messageID", zap.Int64("session_id", sessionID), zap.Error(err))
-		return
-	}
-	if err := binary.Write(sess.ClientConn, binary.LittleEndian, clientHeader.ServerID); err != nil {
-		logger.Debug("failed to write client header serverID", zap.Int64("session_id", sessionID), zap.Error(err))
+	if err := protocol.WriteClientMessageHeader(sess.ClientConn, clientHeader); err != nil {
+		logger.Debug("failed to write client header", zap.Int64("session_id", sessionID), zap.Error(err))
 		return
 	}
 
