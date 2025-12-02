@@ -45,6 +45,43 @@ func NewManager(gatewayName string, handler PacketHandler) *Manager {
 	}
 }
 
+// Close gracefully closes all gRPC connections
+// This should be called during gateway shutdown to ensure all connections are properly closed
+// It cancels all recvLoop goroutines and closes all gRPC connections
+func (m *Manager) Close() error {
+	logger.Info("Closing gRPC transport manager", zap.String("gateway_name", m.gatewayName))
+
+	// Collect all clients first to avoid modifying map during iteration
+	var clientsToClose []*Client
+	m.clients.Range(func(key, value interface{}) bool {
+		if client, ok := value.(*Client); ok {
+			clientsToClose = append(clientsToClose, client)
+		}
+		return true
+	})
+
+	// Close all collected clients
+	for _, client := range clientsToClose {
+		// Cancel context to stop recvLoop goroutine
+		if client.cancel != nil {
+			client.cancel()
+		}
+		// Close gRPC connection
+		if client.conn != nil {
+			client.conn.Close()
+		}
+	}
+
+	// Clear all entries from map
+	m.clients.Range(func(key, value interface{}) bool {
+		m.clients.Delete(key)
+		return true
+	})
+
+	logger.Info("gRPC transport manager closed", zap.Int("connections_closed", len(clientsToClose)))
+	return nil
+}
+
 func (m *Manager) Send(ctx context.Context, address string, packet *gateway.GamePacket) error {
 	client, err := m.getClient(ctx, address)
 	if err != nil {

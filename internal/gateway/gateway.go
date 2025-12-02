@@ -242,17 +242,24 @@ func (g *Gateway) Shutdown(ctx context.Context) error {
 		// Timeout reached
 	}
 
-	// 5. Close all connection pools
+	// 5. Close all gRPC connections (if using gRPC transport)
+	if g.grpcManager != nil {
+		if err := g.grpcManager.Close(); err != nil {
+			return fmt.Errorf("failed to close gRPC connections: %w", err)
+		}
+	}
+
+	// 6. Close all connection pools
 	if err := g.poolManager.Close(); err != nil {
 		return fmt.Errorf("failed to close connection pools: %w", err)
 	}
 
-	// 6. Close Redis connection
+	// 7. Close Redis connection
 	if err := g.redisClient.Close(); err != nil {
 		return fmt.Errorf("failed to close Redis connection: %w", err)
 	}
 
-	// 7. Shutdown metrics server
+	// 8. Shutdown metrics server
 	if g.metricsServer != nil {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -261,7 +268,7 @@ func (g *Gateway) Shutdown(ctx context.Context) error {
 		}
 	}
 
-	// 7. Shutdown access logger
+	// 9. Shutdown access logger
 	middleware.ShutdownAccessLogger()
 
 	return nil
