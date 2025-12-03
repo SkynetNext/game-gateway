@@ -37,6 +37,9 @@ func (g *Gateway) handleGrpcPacket(packet *gateway.GamePacket) {
 					g.handleServerDisconnect(packet.SessionId, packet.Metadata)
 				}
 				return
+			case "pong":
+				// Heartbeat response, already handled in recvLoop
+				return
 			}
 		}
 	}

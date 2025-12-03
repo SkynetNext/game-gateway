@@ -184,7 +184,13 @@ func New(cfg *config.Config, podName string) (*Gateway, error) {
 		}
 
 		g.gatewayName = gatewayName
-		g.grpcManager = grpcmgr.NewManager(gatewayName, g.handleGrpcPacket)
+		g.grpcManager = grpcmgr.NewManager(
+			gatewayName,
+			g.handleGrpcPacket,
+			cfg.Grpc.HeartbeatInterval,
+			cfg.Grpc.ReconnectInterval,
+			cfg.Grpc.MaxReconnectAttempts,
+		)
 		logger.Info("gRPC transport enabled", zap.String("gateway_name", gatewayName))
 	} else {
 		g.gatewayName = podName

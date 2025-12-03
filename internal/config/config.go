@@ -25,6 +25,9 @@ type Config struct {
 	// Connection pool configuration
 	ConnectionPool ConnectionPoolConfig `yaml:"connection_pool"`
 
+	// gRPC transport configuration
+	Grpc GrpcConfig `yaml:"grpc"`
+
 	// Security configuration
 	Security SecurityConfig `yaml:"security"`
 
@@ -92,6 +95,21 @@ type RoutingConfig struct {
 
 	// Refresh interval for realm mapping
 	RealmRefreshInterval time.Duration `yaml:"realm_refresh_interval"`
+}
+
+// GrpcConfig represents gRPC transport configuration
+type GrpcConfig struct {
+	// Heartbeat interval for connection health check (default: 30s)
+	HeartbeatInterval time.Duration `yaml:"heartbeat_interval"`
+
+	// Connection timeout for establishing new connections (default: 10s)
+	ConnectionTimeout time.Duration `yaml:"connection_timeout"`
+
+	// Reconnect interval when connection is lost (default: 5s)
+	ReconnectInterval time.Duration `yaml:"reconnect_interval"`
+
+	// Maximum reconnect attempts (0 = unlimited, default: 0)
+	MaxReconnectAttempts int `yaml:"max_reconnect_attempts"`
 }
 
 // ConnectionPoolConfig represents connection pool configuration
@@ -318,6 +336,18 @@ func setDefaults(cfg *Config) {
 		// This provides a buffer for connection peaks without blocking acceptLoop
 		cfg.ConnectionPool.ConnectionQueueSize = 1000
 	}
+
+	// gRPC defaults
+	if cfg.Grpc.HeartbeatInterval == 0 {
+		cfg.Grpc.HeartbeatInterval = 30 * time.Second
+	}
+	if cfg.Grpc.ConnectionTimeout == 0 {
+		cfg.Grpc.ConnectionTimeout = 10 * time.Second
+	}
+	if cfg.Grpc.ReconnectInterval == 0 {
+		cfg.Grpc.ReconnectInterval = 5 * time.Second
+	}
+	// MaxReconnectAttempts: 0 means unlimited (default)
 
 	if cfg.GracefulShutdownTimeout == 0 {
 		cfg.GracefulShutdownTimeout = 30 * time.Second
