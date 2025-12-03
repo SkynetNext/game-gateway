@@ -1,18 +1,52 @@
-.PHONY: build build-release build-debug run test clean
+.PHONY: build build-release build-debug run test clean configure-log-level
+
+# Default log level (can be overridden: make build LOG_LEVEL=debug)
+LOG_LEVEL ?= info
+
+# Build information (can be injected via ldflags)
+VERSION ?= dev
+BUILD_TIME ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+
+# Configure log level for compile-time optimization
+configure-log-level:
+	@echo "==> Configuring log level: $(LOG_LEVEL)"
+	@if [ "$(LOG_LEVEL)" = "debug" ]; then \
+		echo "Setting MinLogLevel to DebugLevel (all logs enabled)"; \
+		sed -i 's/MinLogLevel zapcore.Level = zapcore\.InfoLevel/MinLogLevel zapcore.Level = zapcore.DebugLevel/' internal/logger/logger.go; \
+		sed -i 's/MinLogLevel zapcore.Level = zapcore\.DebugLevel/MinLogLevel zapcore.Level = zapcore.DebugLevel/' internal/logger/logger.go; \
+	else \
+		echo "Setting MinLogLevel to InfoLevel (Debug logs eliminated at compile time)"; \
+		sed -i 's/MinLogLevel zapcore.Level = zapcore\.DebugLevel/MinLogLevel zapcore.Level = zapcore.InfoLevel/' internal/logger/logger.go; \
+		sed -i 's/MinLogLevel zapcore.Level = zapcore\.InfoLevel/MinLogLevel zapcore.Level = zapcore.InfoLevel/' internal/logger/logger.go; \
+	fi
+	@echo "==> Verifying MinLogLevel configuration:"
+	@grep "MinLogLevel zapcore.Level" internal/logger/logger.go || true
 
 # Build the gateway (default: production build with Info level)
-build:
-	go build -o game-gateway ./cmd/gateway
+build: configure-log-level
+	@echo "Build info:"
+	@echo "  Version: $(VERSION)"
+	@echo "  Build Time: $(BUILD_TIME)"
+	@echo "  Git Commit: $(GIT_COMMIT)"
+	@echo "  Log Level: $(LOG_LEVEL)"
+	go build -ldflags "-X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME) -X main.gitCommit=$(GIT_COMMIT)" \
+		-o game-gateway ./cmd/gateway
 
 # Build for production (Info level, Debug logs eliminated at compile time)
-build-release:
-	go build -o game-gateway ./cmd/gateway
+build-release: LOG_LEVEL=info
+build-release: build
 
-# Build for debug (requires MinLogLevel = zapcore.DebugLevel in logger.go)
-# Note: You need to manually change MinLogLevel in internal/logger/logger.go
-build-debug:
-	@echo "Warning: Make sure MinLogLevel = zapcore.DebugLevel in internal/logger/logger.go"
-	go build -o game-gateway-debug ./cmd/gateway
+# Build for debug (Debug level, all logs enabled)
+build-debug: LOG_LEVEL=debug
+build-debug: configure-log-level
+	@echo "Build info:"
+	@echo "  Version: $(VERSION)"
+	@echo "  Build Time: $(BUILD_TIME)"
+	@echo "  Git Commit: $(GIT_COMMIT)"
+	@echo "  Log Level: $(LOG_LEVEL)"
+	go build -ldflags "-X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME) -X main.gitCommit=$(GIT_COMMIT)" \
+		-o game-gateway-debug ./cmd/gateway
 
 # Run the gateway
 run: build
