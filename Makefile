@@ -1,4 +1,4 @@
-.PHONY: build build-release build-debug run test clean configure-log-level
+.PHONY: build build-clean build-release build-debug run test clean configure-log-level
 
 # Default log level (can be overridden: make build LOG_LEVEL=debug)
 LOG_LEVEL ?= info
@@ -24,6 +24,7 @@ configure-log-level:
 	@grep "MinLogLevel zapcore.Level" internal/logger/logger.go || true
 
 # Build the gateway (default: production build with Info level)
+# Note: Go has excellent incremental compilation, so clean is usually not needed
 build: configure-log-level
 	@echo "Build info:"
 	@echo "  Version: $(VERSION)"
@@ -32,6 +33,10 @@ build: configure-log-level
 	@echo "  Log Level: $(LOG_LEVEL)"
 	go build -ldflags "-X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME) -X main.gitCommit=$(GIT_COMMIT)" \
 		-o game-gateway ./cmd/gateway
+
+# Clean build: removes artifacts and rebuilds from scratch
+# Useful when source files are modified externally (e.g., sed in CI)
+build-clean: clean build
 
 # Build for production (Info level, Debug logs eliminated at compile time)
 build-release: LOG_LEVEL=info
