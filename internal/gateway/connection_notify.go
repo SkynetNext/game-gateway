@@ -10,7 +10,9 @@ import (
 	"go.uber.org/zap"
 )
 
-func (g *Gateway) notifyBackendConnect(ctx context.Context, backendAddr string, sessionID int64, clientIP string, protocol string) error {
+// notifyBackendClientConnect notifies GameServer that a client has connected to this Gateway.
+// This is a client-level connection notification, not a Gateway-level connection.
+func (g *Gateway) notifyBackendClientConnect(ctx context.Context, backendAddr string, sessionID int64, clientIP string, protocol string) error {
 	if !g.config.Server.UseGrpc {
 		return nil
 	}
@@ -46,7 +48,9 @@ func (g *Gateway) notifyBackendConnect(ctx context.Context, backendAddr string, 
 	return nil
 }
 
-func (g *Gateway) notifyBackendDisconnect(ctx context.Context, backendAddr string, sessionID int64, reason string) {
+// notifyBackendClientDisconnect notifies GameServer that a client has disconnected from this Gateway.
+// This is a client-level disconnection notification, not a Gateway-level disconnection.
+func (g *Gateway) notifyBackendClientDisconnect(ctx context.Context, backendAddr string, sessionID int64, reason string) {
 	if !g.config.Server.UseGrpc {
 		return
 	}

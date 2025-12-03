@@ -3,8 +3,8 @@ package grpc
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"io"
-	"strconv"
 	"sync"
 	"time"
 
@@ -16,6 +16,7 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -33,7 +34,7 @@ type Manager struct {
 	handler     PacketHandler
 
 	// Configuration
-	heartbeatInterval    time.Duration
+	keepaliveTime        time.Duration // Used for gRPC keepalive configuration
 	reconnectInterval    time.Duration
 	maxReconnectAttempts int
 	ctx                  context.Context
@@ -46,17 +47,16 @@ type Client struct {
 	cancel context.CancelFunc
 
 	// Connection state
-	lastHeartbeat     time.Time
 	reconnectAttempts int
 	mu                sync.RWMutex
 }
 
-func NewManager(gatewayName string, handler PacketHandler, heartbeatInterval, reconnectInterval time.Duration, maxReconnectAttempts int) *Manager {
+func NewManager(gatewayName string, handler PacketHandler, keepaliveTime, reconnectInterval time.Duration, maxReconnectAttempts int) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Manager{
 		gatewayName:          gatewayName,
 		handler:              handler,
-		heartbeatInterval:    heartbeatInterval,
+		keepaliveTime:        keepaliveTime,
 		reconnectInterval:    reconnectInterval,
 		maxReconnectAttempts: maxReconnectAttempts,
 		ctx:                  ctx,
@@ -135,11 +135,6 @@ func (m *Manager) Send(ctx context.Context, address string, packet *gateway.Game
 		return fmt.Errorf("send failed: %w", err)
 	}
 
-	// Update last heartbeat time on successful send
-	client.mu.Lock()
-	client.lastHeartbeat = time.Now()
-	client.mu.Unlock()
-
 	return nil
 }
 
@@ -184,8 +179,16 @@ func (m *Manager) getClient(ctx context.Context, address string) (*Client, error
 		}
 
 		// Create new connection using NewClient (replaces deprecated Dial/DialContext)
+		// Configure gRPC keepalive for connection health monitoring
 		// Note: NewClient returns a client that is initially idle and doesn't connect immediately
-		conn, err = grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		keepaliveParams := keepalive.ClientParameters{
+			Time:                m.keepaliveTime,     // Send keepalive ping every keepaliveTime
+			Timeout:             m.keepaliveTime / 2, // Wait keepaliveTime/2 for ping ack before considering connection dead
+			PermitWithoutStream: true,                // Send keepalive pings even when there are no active streams
+		}
+		conn, err = grpc.NewClient(address,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithKeepaliveParams(keepaliveParams))
 		if err != nil {
 			span.RecordError(err)
 			logger.Warn("Failed to create gRPC client",
@@ -230,15 +233,11 @@ func (m *Manager) getClient(ctx context.Context, address string) (*Client, error
 		conn:              conn,
 		stream:            stream,
 		cancel:            cancel,
-		lastHeartbeat:     time.Now(),
 		reconnectAttempts: 0,
 	}
 
 	// Start receiving goroutine
 	go m.recvLoop(address, stream, client)
-
-	// Start heartbeat goroutine
-	go m.heartbeatLoop(address, client)
 
 	// Use LoadOrStore to atomically store the client, or return existing one if another goroutine created it
 	actualClient, loaded := m.clients.LoadOrStore(address, client)
@@ -284,17 +283,6 @@ func (m *Manager) recvLoop(address string, stream gateway.GameGatewayService_Str
 			return
 		}
 
-		// Handle pong (heartbeat response)
-		if packet.Metadata != nil {
-			if packetType, ok := packet.Metadata["packet_type"]; ok && packetType == "pong" {
-				client.mu.Lock()
-				client.lastHeartbeat = time.Now()
-				client.mu.Unlock()
-				logger.Debug("gRPC received pong", zap.String("address", address))
-				continue
-			}
-		}
-
 		logger.Debug("gRPC recv packet",
 			zap.String("address", address),
 			zap.Int64("session_id", packet.SessionId),
@@ -329,59 +317,6 @@ func (m *Manager) recvLoop(address string, stream gateway.GameGatewayService_Str
 	}
 }
 
-// heartbeatLoop sends periodic ping packets to keep the connection alive
-func (m *Manager) heartbeatLoop(address string, client *Client) {
-	ticker := time.NewTicker(m.heartbeatInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-m.ctx.Done():
-			return
-		case <-ticker.C:
-			// Check if client still exists and is the same
-			actualClient, ok := m.clients.Load(address)
-			if !ok || actualClient != client {
-				return // Client was replaced or removed
-			}
-
-			// Send ping
-			pingPacket := &gateway.GamePacket{
-				SessionId: 0,
-				MsgId:     0,
-				Payload:   nil,
-				Metadata: map[string]string{
-					"packet_type": "ping",
-					"timestamp":   strconv.FormatInt(time.Now().UnixMilli(), 10),
-				},
-			}
-
-			err := client.stream.Send(pingPacket)
-			if err != nil {
-				logger.Warn("gRPC heartbeat ping failed",
-					zap.String("address", address),
-					zap.Error(err))
-				// Connection is likely dead, recvLoop will handle cleanup
-				return
-			}
-
-			// Check if we received pong within reasonable time
-			client.mu.RLock()
-			lastHeartbeat := client.lastHeartbeat
-			client.mu.RUnlock()
-
-			// If no pong received within 2 * heartbeatInterval, consider connection dead
-			if time.Since(lastHeartbeat) > 2*m.heartbeatInterval {
-				logger.Warn("gRPC heartbeat timeout, connection may be dead",
-					zap.String("address", address),
-					zap.Duration("time_since_last_heartbeat", time.Since(lastHeartbeat)))
-				// recvLoop will detect the error and trigger reconnection
-				return
-			}
-		}
-	}
-}
-
 // reconnect attempts to reconnect to the given address
 func (m *Manager) reconnect(address string) {
 	// Check if already reconnecting or reconnected
@@ -389,11 +324,12 @@ func (m *Manager) reconnect(address string) {
 		return // Already reconnected
 	}
 
+	var attempts int
 	client, ok := m.clients.Load(address)
 	if ok {
 		actualClient := client.(*Client)
 		actualClient.mu.Lock()
-		attempts := actualClient.reconnectAttempts
+		attempts = actualClient.reconnectAttempts
 		actualClient.mu.Unlock()
 
 		// Check max reconnect attempts
@@ -405,15 +341,37 @@ func (m *Manager) reconnect(address string) {
 		}
 	}
 
+	// Calculate exponential backoff with jitter (similar to getClient logic)
+	// Base delay: 100ms, 200ms, 400ms, 800ms, ...
+	// Cap at reconnectInterval * 10 to avoid excessive delays
+	baseBackoff := time.Duration(100*(1<<uint(attempts))) * time.Millisecond
+	maxBackoff := m.reconnectInterval * 10
+	if baseBackoff > maxBackoff {
+		baseBackoff = maxBackoff
+	}
+
+	// Add jitter (0-100ms random delay) to avoid thundering herd problem
+	// when multiple gateways reconnect simultaneously
+	maxJitter := 100 * time.Millisecond
+	// Use hash-based jitter for deterministic but distributed delays
+	// This ensures different addresses get different jitter values
+	h := fnv.New32a()
+	h.Write([]byte(address))
+	jitterValue := time.Duration(h.Sum32()%uint32(maxJitter.Milliseconds())) * time.Millisecond
+	backoff := baseBackoff + jitterValue
+
 	logger.Info("gRPC attempting to reconnect",
 		zap.String("address", address),
-		zap.Duration("interval", m.reconnectInterval))
+		zap.Int("attempt", attempts+1),
+		zap.Duration("base_backoff", baseBackoff),
+		zap.Duration("jitter", jitterValue),
+		zap.Duration("total_backoff", backoff))
 
-	// Wait before reconnecting
+	// Wait before reconnecting (exponential backoff with jitter)
 	select {
 	case <-m.ctx.Done():
 		return
-	case <-time.After(m.reconnectInterval):
+	case <-time.After(backoff):
 	}
 
 	// Try to reconnect
@@ -424,6 +382,7 @@ func (m *Manager) reconnect(address string) {
 	if err != nil {
 		logger.Warn("gRPC reconnect failed, will retry",
 			zap.String("address", address),
+			zap.Int("attempt", attempts+1),
 			zap.Error(err))
 		// Update reconnect attempts
 		if client, ok := m.clients.Load(address); ok {
@@ -432,7 +391,7 @@ func (m *Manager) reconnect(address string) {
 			actualClient.reconnectAttempts++
 			actualClient.mu.Unlock()
 		}
-		// Retry after interval
+		// Retry after exponential backoff
 		go m.reconnect(address)
 	} else {
 		logger.Info("gRPC reconnected successfully",

@@ -187,7 +187,7 @@ func New(cfg *config.Config, podName string) (*Gateway, error) {
 		g.grpcManager = grpcmgr.NewManager(
 			gatewayName,
 			g.handleGrpcPacket,
-			cfg.Grpc.HeartbeatInterval,
+			cfg.Grpc.HeartbeatInterval, // Used as keepalive time for gRPC keepalive
 			cfg.Grpc.ReconnectInterval,
 			cfg.Grpc.MaxReconnectAttempts,
 		)
@@ -942,7 +942,7 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 
 	// Notify backend server that client has connected (best practice)
 	clientIP := extractIP(remoteAddr)
-	if err := g.notifyBackendConnect(ctx, backendAddr, sessionID, clientIP, "tcp"); err != nil {
+	if err := g.notifyBackendClientConnect(ctx, backendAddr, sessionID, clientIP, "tcp"); err != nil {
 		// Connection notification failed, reject this connection
 		connStats.status = "error"
 		connStats.errorMsg = fmt.Sprintf("notify connect failed: %v", err)
@@ -961,7 +961,7 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 		if connStats.status == "error" {
 			disconnectReason = connStats.errorMsg
 		}
-		g.notifyBackendDisconnect(context.Background(), backendAddr, sessionID, disconnectReason)
+		g.notifyBackendClientDisconnect(context.Background(), backendAddr, sessionID, disconnectReason)
 
 		if r := recover(); r != nil {
 			log.Error("panic in handleTCPConnection",

@@ -24,47 +24,25 @@ const (
 	GateMsgHeaderExtendedSize = 1 + 8 + 16 + 8
 )
 
-// Client Message Header Structure (from client-side packMessage/unpackMessage):
+// ClientMessageHeader represents the client message header (8 bytes, Little Endian)
 //
-// The client sends messages with the following header structure (8 bytes, Little Endian):
+// Structure:
+//   - Length (2 bytes): Message data length (excluding header)
+//   - MessageID (2 bytes): Message ID
+//   - ServerID (4 bytes): Server ID with bit structure:
+//   - bit 31: isZip (compression flag)
+//   - bit 16-30: worldId (15 bits, max 32767)
+//   - bit 8-15: serverType (8 bits, max 256)
+//   - bit 0-7: instID (8 bits, max 256)
+//     Format: worldId.serverType.instID (e.g., 1.10.2)
 //
-//	Offset  Size    Type      Description                    Endian
-//	0-1     2       uint16    length - Message data length   Little Endian
-//	                          (excluding header, i.e., only message body size)
-//	2-3     2       uint16    messageId - Message ID         Little Endian
-//	4-7     4       uint32    serverId - Server ID           Little Endian
-//	                          Bit structure (reused for routing, CRC/Seq not used):
-//	                          - bit 31: isZip (compression flag, 1=compressed, 0=uncompressed)
-//	                          - bit 16-30: worldId (world ID, 15 bits, max 32767 worlds)
-//	                          - bit 8-15: serverType (server type ID, 8 bits, max 256 types)
-//	                          - bit 0-7: instID (instance ID, 8 bits, max 256 instances)
+// Full client message: [ClientMessageHeader (8 bytes)] + [Message Data]
 //
-//	                          Format: worldId.serverType.instID (e.g., 1.10.2)
-//	                          This matches ServerID structure for routing to backend services.
+// Gateway to backend (TCP mode only):
 //
-//	                          Extraction examples:
-//	                          - isZip: (serverId & 0x80000000) != 0
-//	                          - worldId: (ushort)((serverId >> 16) & 0x7FFF)
-//	                          - serverType: (byte)((serverId >> 8) & 0xFF)
-//	                          - instID: (byte)(serverId & 0xFF)
+//	[ServerMessageHeader (16 bytes)] + [GateMsgHeader (9 bytes)] + [Message Data]
 //
-// Full client message structure:
-//	[Client Message Header (8 bytes)] + [Message Data (length bytes)]
-//
-// Gateway sends to backend format (matches original GateServer):
-//	[Server Message Header (16 bytes)] + [Gate Message Header (9 bytes)] + [Message Data]
-//
-// Server Message Header (16 bytes, Little Endian):
-//	- Length (4 bytes): Total length of GateMsgHeader + Message Data
-//	- Type (4 bytes): Message type (from client MessageID)
-//	- ServerID (4 bytes): Set to 0 for client messages
-//	- ObjectID (8 bytes): SessionID
-//
-// Gate Message Header (9 bytes):
-//	- OpCode (1 byte): GateMsgOpCode.Trans = 1
-//	- SessionID (8 bytes, Little Endian): Session ID
-
-// ClientMessageHeader represents the client message header (8 bytes)
+// Note: gRPC mode uses GamePacket with metadata instead of GateMsgHeader.
 type ClientMessageHeader struct {
 	Length    uint16 // Message data length (excluding header)
 	MessageID uint16 // Message ID
@@ -233,9 +211,11 @@ func ReadFullPacket(r io.Reader, maxMessageSize int) (*ClientMessageHeader, []by
 	return header, data, nil
 }
 
-// WriteServerMessage writes a complete server message (MessageHeader + GateMsgHeader + Message Data)
-// This matches the format used by original GateServer when sending to backend services
-// If traceContext is provided, includes Trace ID and Span ID in extended format
+// WriteServerMessage writes a complete server message for TCP mode:
+// [ServerMessageHeader (16 bytes)] + [GateMsgHeader (9 or 33 bytes)] + [Message Data]
+// This matches the format used by original GateServer when sending to backend services.
+// If traceContext is provided, uses extended GateMsgHeader format (33 bytes) with Trace ID and Span ID.
+// Note: gRPC mode uses GamePacket with metadata instead of this format.
 func WriteServerMessage(w io.Writer, messageType int32, sessionID int64, messageData []byte, traceContext ...map[string]string) error {
 	// Create GateMsgHeader
 	gateHeader := &GateMsgHeader{
