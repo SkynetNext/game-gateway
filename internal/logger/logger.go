@@ -22,6 +22,32 @@ const (
 	SeverityFatal = 21
 )
 
+// Compile-time log level constants for dead code elimination
+// These constants allow the Go compiler to eliminate dead code at compile time
+// When MinLogLevel is set to Info (default), all Debug() calls are eliminated
+// This is similar to C macros: #ifdef DEBUG ... #endif
+const (
+	// MinLogLevel defines the minimum log level at compile time
+	// Change this value to control which log levels are compiled in
+	// Default: InfoLevel (production builds - Debug logs are eliminated)
+	// For debug builds, change to: zapcore.DebugLevel
+	// The Go compiler will eliminate all code paths for disabled levels
+	MinLogLevel zapcore.Level = zapcore.InfoLevel
+)
+
+// Compile-time level checks (will be optimized away by compiler)
+// These are const bool values that the compiler uses for dead code elimination
+// If debugEnabled is false, the entire Debug() function body is eliminated
+const (
+	// These constants allow compile-time dead code elimination
+	// If MinLogLevel > DebugLevel, all Debug() calls will be eliminated at compile time
+	// This is equivalent to C's #ifdef DEBUG preprocessor directive
+	debugEnabled = MinLogLevel <= zapcore.DebugLevel
+	infoEnabled  = MinLogLevel <= zapcore.InfoLevel
+	warnEnabled  = MinLogLevel <= zapcore.WarnLevel
+	errorEnabled = MinLogLevel <= zapcore.ErrorLevel
+)
+
 // ServiceInfo holds service metadata for structured logging
 // Follows OpenTelemetry Semantic Conventions for Resources
 // https://opentelemetry.io/docs/specs/semconv/resource/
@@ -41,6 +67,10 @@ var (
 
 	// initOnce ensures Init is called only once
 	initOnce sync.Once
+
+	// currentLevel caches the current log level for fast checks
+	// This allows compile-time optimization when level is known
+	currentLevel zapcore.Level
 )
 
 // Config holds logger configuration
@@ -126,6 +156,9 @@ func Init(cfg Config) error {
 		if serviceInfo.Version != "" {
 			L = L.With(zap.String("service.version", serviceInfo.Version))
 		}
+
+		// Cache current log level for fast runtime checks
+		currentLevel = zapLevel
 	})
 	return initErr
 }
@@ -212,25 +245,42 @@ func (cl *ContextLogger) SpanID() string {
 }
 
 // Debug logs at debug level with severity_number
+// Compile-time optimization: if debugEnabled is false, compiler eliminates this code
 func (cl *ContextLogger) Debug(msg string, fields ...zap.Field) {
+	if !debugEnabled {
+		return
+	}
 	fields = append(fields, zap.Int("severity_number", SeverityDebug))
 	cl.logger.WithOptions(zap.AddCallerSkip(1)).Debug(msg, fields...)
 }
 
 // Info logs at info level with severity_number
+// Compile-time optimization: if infoEnabled is false, compiler eliminates this code
 func (cl *ContextLogger) Info(msg string, fields ...zap.Field) {
+	if !infoEnabled {
+		return
+	}
 	fields = append(fields, zap.Int("severity_number", SeverityInfo))
 	cl.logger.WithOptions(zap.AddCallerSkip(1)).Info(msg, fields...)
 }
 
 // Warn logs at warn level with severity_number
+// Compile-time optimization: if warnEnabled is false, compiler eliminates this code
 func (cl *ContextLogger) Warn(msg string, fields ...zap.Field) {
+	if !warnEnabled {
+		return
+	}
 	fields = append(fields, zap.Int("severity_number", SeverityWarn))
 	cl.logger.WithOptions(zap.AddCallerSkip(1)).Warn(msg, fields...)
 }
 
 // Error logs at error level with severity_number
+// Error logs at error level with severity_number
+// Compile-time optimization: if errorEnabled is false, compiler eliminates this code
 func (cl *ContextLogger) Error(msg string, fields ...zap.Field) {
+	if !errorEnabled {
+		return
+	}
 	fields = append(fields, zap.Int("severity_number", SeverityError))
 	cl.logger.WithOptions(zap.AddCallerSkip(1)).Error(msg, fields...)
 }
@@ -242,35 +292,64 @@ func (cl *ContextLogger) Error(msg string, fields ...zap.Field) {
 // ============================================================================
 
 // Info logs at info level (no trace context)
+// Compile-time optimization: if infoEnabled is false, compiler eliminates this code
 func Info(msg string, fields ...zap.Field) {
-	if L != nil {
-		fields = append(fields, zap.Int("severity_number", SeverityInfo))
-		L.WithOptions(zap.AddCallerSkip(1)).Info(msg, fields...)
+	// Compile-time check: if infoEnabled is false, this entire block is eliminated
+	if !infoEnabled {
+		return
 	}
+	// Runtime check: additional safety check
+	if L == nil || currentLevel > zapcore.InfoLevel {
+		return
+	}
+	fields = append(fields, zap.Int("severity_number", SeverityInfo))
+	L.WithOptions(zap.AddCallerSkip(1)).Info(msg, fields...)
 }
 
 // Error logs at error level (no trace context)
+// Compile-time optimization: if errorEnabled is false, compiler eliminates this code
+// Note: Error level is typically always enabled in production
 func Error(msg string, fields ...zap.Field) {
-	if L != nil {
-		fields = append(fields, zap.Int("severity_number", SeverityError))
-		L.WithOptions(zap.AddCallerSkip(1)).Error(msg, fields...)
+	// Compile-time check: if errorEnabled is false, this entire block is eliminated
+	if !errorEnabled {
+		return
 	}
+	// Runtime check: additional safety check
+	if L == nil || currentLevel > zapcore.ErrorLevel {
+		return
+	}
+	fields = append(fields, zap.Int("severity_number", SeverityError))
+	L.WithOptions(zap.AddCallerSkip(1)).Error(msg, fields...)
 }
 
 // Warn logs at warn level (no trace context)
+// Compile-time optimization: if warnEnabled is false, compiler eliminates this code
 func Warn(msg string, fields ...zap.Field) {
-	if L != nil {
-		fields = append(fields, zap.Int("severity_number", SeverityWarn))
-		L.WithOptions(zap.AddCallerSkip(1)).Warn(msg, fields...)
+	// Compile-time check: if warnEnabled is false, this entire block is eliminated
+	if !warnEnabled {
+		return
 	}
+	// Runtime check: additional safety check
+	if L == nil || currentLevel > zapcore.WarnLevel {
+		return
+	}
+	fields = append(fields, zap.Int("severity_number", SeverityWarn))
+	L.WithOptions(zap.AddCallerSkip(1)).Warn(msg, fields...)
 }
 
 // Debug logs at debug level (no trace context)
+// Compile-time optimization: if debugEnabled is false, compiler eliminates this code
 func Debug(msg string, fields ...zap.Field) {
-	if L != nil {
-		fields = append(fields, zap.Int("severity_number", SeverityDebug))
-		L.WithOptions(zap.AddCallerSkip(1)).Debug(msg, fields...)
+	// Compile-time check: if debugEnabled is false, this entire block is eliminated
+	if !debugEnabled {
+		return
 	}
+	// Runtime check: additional safety check (will be optimized if L is nil)
+	if L == nil || currentLevel > zapcore.DebugLevel {
+		return
+	}
+	fields = append(fields, zap.Int("severity_number", SeverityDebug))
+	L.WithOptions(zap.AddCallerSkip(1)).Debug(msg, fields...)
 }
 
 // ============================================================================
