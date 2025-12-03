@@ -35,6 +35,12 @@ var (
 		Help: "Total number of connections rejected by rate limiter",
 	})
 
+	// Connection rejection metrics
+	ConnectionRejected = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "game_gateway_connection_rejected_total",
+		Help: "Total number of connections rejected",
+	}, []string{"reason"})
+
 	// Circuit breaker metrics
 	CircuitBreakerState = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "game_gateway_circuit_breaker_state",
@@ -77,3 +83,8 @@ var (
 		Help: "Total number of connection pool cleanup errors",
 	})
 )
+
+// IncConnectionRejected increments the connection rejected counter
+func IncConnectionRejected(reason string) {
+	ConnectionRejected.WithLabelValues(reason).Inc()
+}

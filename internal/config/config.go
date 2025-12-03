@@ -117,6 +117,17 @@ type ConnectionPoolConfig struct {
 	// Retry configuration
 	MaxRetries int           `yaml:"max_retries"` // Maximum retry attempts for connection
 	RetryDelay time.Duration `yaml:"retry_delay"` // Delay between retries
+
+	// Goroutine pool configuration
+	// Maximum number of goroutines in the pool (0 means use default: 10 * runtime.NumCPU())
+	MaxGoroutines int `yaml:"max_goroutines"`
+
+	// Goroutine pool expiration time (goroutines idle for this duration will be recycled)
+	GoroutineExpiry time.Duration `yaml:"goroutine_expiry"`
+
+	// Connection queue size: buffer connections when pool is busy (0 means use default: 1000)
+	// This prevents blocking acceptLoop and allows graceful degradation
+	ConnectionQueueSize int `yaml:"connection_queue_size"`
 }
 
 // SecurityConfig represents security configuration
@@ -291,6 +302,21 @@ func setDefaults(cfg *Config) {
 
 	if cfg.ConnectionPool.RetryDelay == 0 {
 		cfg.ConnectionPool.RetryDelay = 100 * time.Millisecond
+	}
+
+	// Goroutine pool defaults
+	if cfg.ConnectionPool.MaxGoroutines == 0 {
+		// Default: 10 * CPU cores (can be overridden in config)
+		// This will be set dynamically in gateway.go based on runtime.NumCPU()
+		cfg.ConnectionPool.MaxGoroutines = 0 // 0 means use runtime-based default
+	}
+	if cfg.ConnectionPool.GoroutineExpiry == 0 {
+		cfg.ConnectionPool.GoroutineExpiry = 10 * time.Second
+	}
+	if cfg.ConnectionPool.ConnectionQueueSize == 0 {
+		// Default: 1000 connections in queue
+		// This provides a buffer for connection peaks without blocking acceptLoop
+		cfg.ConnectionPool.ConnectionQueueSize = 1000
 	}
 
 	if cfg.GracefulShutdownTimeout == 0 {

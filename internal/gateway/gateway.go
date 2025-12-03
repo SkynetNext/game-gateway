@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,6 +34,7 @@ import (
 	"github.com/SkynetNext/game-gateway/internal/session"
 	"github.com/SkynetNext/game-gateway/internal/tracing"
 	grpcmgr "github.com/SkynetNext/game-gateway/internal/transport/grpc"
+	"github.com/panjf2000/ants/v2"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -74,6 +76,13 @@ type Gateway struct {
 	// State
 	draining int32 // Atomic: 0=Running, 1=Draining
 	wg       sync.WaitGroup
+
+	// Goroutine pool for connection handling
+	goroutinePool *ants.Pool
+
+	// Connection queue: buffer connections when pool is busy
+	// This prevents blocking acceptLoop and allows graceful degradation
+	connQueue chan net.Conn
 
 	// Context for graceful shutdown
 	ctx    context.Context
@@ -120,6 +129,36 @@ func New(cfg *config.Config, podName string) (*Gateway, error) {
 		cfg.Security.ConnectionRateLimit,
 	)
 
+	// Initialize goroutine pool for connection handling
+	// Default: 10 * CPU cores (can be overridden in config)
+	maxGoroutines := cfg.ConnectionPool.MaxGoroutines
+	if maxGoroutines == 0 {
+		maxGoroutines = 10 * runtime.NumCPU()
+	}
+	// Use non-blocking mode: when pool is full, return error immediately
+	// We'll use a connection queue to buffer connections instead of blocking
+	goroutinePool, err := ants.NewPool(
+		maxGoroutines,
+		ants.WithOptions(ants.Options{
+			ExpiryDuration: cfg.ConnectionPool.GoroutineExpiry,
+			Nonblocking:    true, // Non-blocking: return error when pool is full
+		}),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create goroutine pool: %w", err)
+	}
+
+	// Create connection queue: buffer connections when pool is busy
+	// This prevents blocking acceptLoop and allows graceful degradation
+	connQueueSize := cfg.ConnectionPool.ConnectionQueueSize
+	connQueue := make(chan net.Conn, connQueueSize)
+
+	logger.Info("goroutine pool initialized",
+		zap.Int("max_goroutines", maxGoroutines),
+		zap.Duration("expiry_duration", cfg.ConnectionPool.GoroutineExpiry),
+		zap.Int("connection_queue_size", connQueueSize),
+	)
+
 	g := &Gateway{
 		config:          cfg,
 		podName:         podName,
@@ -131,6 +170,8 @@ func New(cfg *config.Config, podName string) (*Gateway, error) {
 		rateLimiter:     rateLimiter,
 		ipLimiter:       ipLimiter,
 		circuitBreakers: make(map[string]*circuitbreaker.Breaker),
+		goroutinePool:   goroutinePool,
+		connQueue:       connQueue,
 	}
 
 	if cfg.Server.UseGrpc {
@@ -197,15 +238,24 @@ func (g *Gateway) Start(ctx context.Context) error {
 		}
 	}()
 
-	// 5. Initialize access logger (simplified - no batching needed, Zap is already fast)
+	// 5. Start connection queue processor
+	// This goroutine processes connections from the queue and submits them to the pool
+	// This prevents blocking acceptLoop when pool is busy
+	g.wg.Add(1)
+	go func() {
+		defer g.wg.Done()
+		g.processConnectionQueue(g.ctx)
+	}()
+
+	// 6. Initialize access logger (simplified - no batching needed, Zap is already fast)
 	middleware.InitAccessLogger(true)
 
-	// 6. Start metrics and health check server
+	// 7. Start metrics and health check server
 	if err := g.startMetricsServer(g.ctx); err != nil {
 		return fmt.Errorf("failed to start metrics server: %w", err)
 	}
 
-	// 7. Start business listener
+	// 8. Start business listener
 	if err := g.startListener(g.ctx); err != nil {
 		return fmt.Errorf("failed to start listener: %w", err)
 	}
@@ -249,17 +299,27 @@ func (g *Gateway) Shutdown(ctx context.Context) error {
 		}
 	}
 
-	// 6. Close all connection pools
+	// 6. Close connection queue (this will stop queue processor)
+	if g.connQueue != nil {
+		close(g.connQueue)
+	}
+
+	// 7. Release goroutine pool
+	if g.goroutinePool != nil {
+		g.goroutinePool.Release()
+	}
+
+	// 8. Close all connection pools
 	if err := g.poolManager.Close(); err != nil {
 		return fmt.Errorf("failed to close connection pools: %w", err)
 	}
 
-	// 7. Close Redis connection
+	// 9. Close Redis connection
 	if err := g.redisClient.Close(); err != nil {
 		return fmt.Errorf("failed to close Redis connection: %w", err)
 	}
 
-	// 8. Shutdown metrics server
+	// 10. Shutdown metrics server
 	if g.metricsServer != nil {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -358,6 +418,43 @@ func (g *Gateway) startListener(ctx context.Context) error {
 	return nil
 }
 
+// processConnectionQueue processes connections from the queue
+// This allows acceptLoop to continue accepting connections even when pool is busy
+func (g *Gateway) processConnectionQueue(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			// Shutdown: drain remaining connections in queue
+			for {
+				select {
+				case conn := <-g.connQueue:
+					conn.Close()
+					g.wg.Done() // Release waitgroup counter
+				default:
+					// Queue is empty, exit
+					return
+				}
+			}
+		case conn := <-g.connQueue:
+			// Try to submit connection to pool
+			err := g.goroutinePool.Submit(func() {
+				defer g.wg.Done() // Release waitgroup counter
+				g.handleConnection(ctx, conn)
+			})
+			if err != nil {
+				// Pool is closed or still full, close connection
+				conn.Close()
+				g.wg.Done() // Release waitgroup counter
+				logger.Warn("failed to submit queued connection to pool, connection closed",
+					zap.Error(err),
+					zap.String("remote_addr", conn.RemoteAddr().String()),
+				)
+				metrics.IncConnectionRejected("pool_closed_or_full")
+			}
+		}
+	}
+}
+
 // acceptLoop accepts incoming connections
 // Simplified implementation following unified-access-gateway pattern
 // Removed SetDeadline on listener to avoid Accept delays
@@ -405,12 +502,31 @@ func (g *Gateway) acceptLoop(ctx context.Context) {
 			continue
 		}
 
-		// Handle connection in goroutine
+		// Try to submit connection to pool immediately (non-blocking)
+		// If pool is busy, put connection in queue for later processing
 		g.wg.Add(1)
-		go func(c net.Conn) {
+		err = g.goroutinePool.Submit(func() {
 			defer g.wg.Done()
-			g.handleConnection(ctx, c)
-		}(conn)
+			g.handleConnection(ctx, conn)
+		})
+		if err != nil {
+			// Pool is full, try to put connection in queue
+			select {
+			case g.connQueue <- conn:
+				// Connection queued successfully, will be processed by queue processor
+				// Note: wg.Done() will be called in processConnectionQueue
+			default:
+				// Queue is also full, reject connection
+				g.wg.Done()
+				conn.Close()
+				logger.Warn("connection rejected: pool and queue both full",
+					zap.String("remote_addr", conn.RemoteAddr().String()),
+					zap.Int("queue_size", len(g.connQueue)),
+					zap.Int("queue_capacity", cap(g.connQueue)),
+				)
+				metrics.IncConnectionRejected("pool_and_queue_full")
+			}
+		}
 	}
 }
 
