@@ -549,7 +549,7 @@ In gRPC mode, multiple Gateway pods communicate with multiple GameServer instanc
 - **One bidirectional stream** (`StreamPackets`) per GameServer address
 - Stream is established when first client session routes to that GameServer
 - Stream is reused for all client sessions routed to the same GameServer
-- Gateway Pod Name (e.g., `game-gateway-abc123`) is sent in gRPC metadata header (`gate-name`)
+- Gateway Pod Name (e.g., `game-gateway-abc123`) is sent in gRPC metadata header (`gateway-name`)
 
 **GameServer Side**:
 - Each GameServer instance maintains a **GrpcConnectionManager**
@@ -563,18 +563,18 @@ In gRPC mode, multiple Gateway pods communicate with multiple GameServer instanc
    - **Purpose**: Message forwarding (Gateway → GameServer, GameServer → Gateway)
    - **Frequency**: One stream per Gateway Pod per GameServer address
    - **Lifecycle**: Long-lived, established on first use, closed when Gateway disconnects
-   - **Metadata**: `gate-name` header sent once during stream establishment
+   - **Metadata**: `gateway-name` header sent once during stream establishment
 
 2. **NotifyConnect (Unary RPC)**:
    - **Purpose**: Notify GameServer of new client connection
    - **Frequency**: Once per client connection
-   - **Metadata**: `gate-name` header sent with each call
+   - **Metadata**: `gateway-name` header sent with each call
    - **Caching**: GameServer caches `sessionID → gatewayName` mapping for login flow
 
 3. **NotifyDisconnect (Unary RPC)**:
    - **Purpose**: Notify GameServer of client disconnection
    - **Frequency**: Once per client disconnection
-   - **Metadata**: `gate-name` header sent with each call
+   - **Metadata**: `gateway-name` header sent with each call
    - **Cleanup**: GameServer removes `sessionID → gatewayName` mapping
 
 #### Routing Logic

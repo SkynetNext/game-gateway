@@ -50,7 +50,7 @@ type ServerConfig struct {
 	MetricsPort int `yaml:"metrics_port"`
 
 	// Gateway Name for cluster communication (typically Pod Name)
-	// This name is sent in gRPC metadata (gate-name header)
+	// This name is sent in gRPC metadata (gateway-name header)
 	// Backend servers use this to identify the gateway
 	// If empty, will use POD_NAME environment variable
 	GatewayName string `yaml:"gateway_name"`

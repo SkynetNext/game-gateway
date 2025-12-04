@@ -30,7 +30,7 @@ message GamePacket {
   // For connection lifecycle events, metadata must contain:
   //   - "packet_type": "connect", "disconnect", "server_connect", or "server_disconnect"
   //   - For "connect" (Gateway → GameServer): "client_ip", "protocol", "connect_time" (Unix milliseconds)
-  //     Note: gateway_name is obtained from gRPC header during stream establishment, not from packet metadata
+  //     Note: gateway-name is obtained from gRPC header during stream establishment, not from packet metadata
   //   - For "disconnect" (Gateway → GameServer, client-initiated): "reason", "disconnect_time" (Unix milliseconds)
   //   - For "server_connect" (GameServer → Gateway, login accepted): "reason", "connect_time" (Unix milliseconds)
   //   - For "server_disconnect" (GameServer → Gateway, server-initiated): "reason", "disconnect_time" (Unix milliseconds)
