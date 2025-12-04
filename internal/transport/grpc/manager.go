@@ -201,7 +201,7 @@ func (m *Manager) getClient(ctx context.Context, address string) (*Client, error
 		svcClient := gateway.NewGameGatewayServiceClient(conn)
 
 		// Create stream with metadata and trace context
-		md := metadata.Pairs("gate-name", m.gatewayName)
+		md := metadata.Pairs("gateway-name", m.gatewayName)
 		streamCtx, cancelFunc := context.WithCancel(spanCtx) // Use span context to propagate trace
 		streamCtx = metadata.NewOutgoingContext(streamCtx, md)
 		cancel = cancelFunc
