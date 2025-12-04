@@ -156,7 +156,7 @@ func (m *Manager) getClient(ctx context.Context, address string) (*Client, error
 	// This eliminates the need for double-checked locking pattern
 
 	// Create span for gRPC connection establishment
-	spanCtx, span := tracing.StartSpan(ctx, "gateway.grpc_connect")
+	_, span := tracing.StartSpan(ctx, "gateway.grpc_connect")
 	defer span.End()
 
 	span.SetAttributes(
@@ -206,8 +206,10 @@ func (m *Manager) getClient(ctx context.Context, address string) (*Client, error
 		svcClient := gateway.NewGameGatewayServiceClient(conn)
 
 		// Create stream with metadata and trace context
+		// Use Manager's context instead of caller's context to ensure stream doesn't get cancelled
+		// when caller's context expires. The stream should remain alive until Manager is shut down.
 		md := metadata.Pairs(GatewayNameHeader, m.gatewayName)
-		streamCtx, cancelFunc := context.WithCancel(spanCtx) // Use span context to propagate trace
+		streamCtx, cancelFunc := context.WithCancel(m.ctx)
 		streamCtx = metadata.NewOutgoingContext(streamCtx, md)
 		cancel = cancelFunc
 
