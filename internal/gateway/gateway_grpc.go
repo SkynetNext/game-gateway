@@ -53,7 +53,8 @@ func (g *Gateway) handleGrpcPacket(packet *gateway.GamePacket) {
 	}
 
 	// Handle unicast packets
-	if packet.SessionId > 0 {
+	// Note: SessionId can be negative (e.g., -2240067270321065983), so check != 0 instead of > 0
+	if packet.SessionId != 0 {
 		g.sendToSession(packet.SessionId, packet)
 	}
 }
