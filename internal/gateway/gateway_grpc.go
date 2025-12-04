@@ -33,7 +33,8 @@ func (g *Gateway) handleGrpcPacket(packet *gateway.GamePacket) {
 				return
 			case "server_disconnect":
 				// GameServer-initiated disconnect: close the client connection
-				if packet.SessionId > 0 {
+				// Note: SessionId can be negative, so check != 0 instead of > 0
+				if packet.SessionId != 0 {
 					g.handleServerDisconnect(packet.SessionId, packet.Metadata)
 				}
 				return
