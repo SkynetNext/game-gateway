@@ -83,8 +83,8 @@ func Init(serviceName, serviceVersion, endpoint string) error {
 	tracerProvider = tracesdk.NewTracerProvider(
 		tracesdk.WithBatcher(exporter),
 		tracesdk.WithResource(res),
-		// Sample 100% in dev, configure via env in production
-		tracesdk.WithSampler(tracesdk.ParentBased(tracesdk.TraceIDRatioBased(getSampleRate()))),
+		// Always sample 100% of traces (no sampling)
+		tracesdk.WithSampler(tracesdk.AlwaysSample()),
 	)
 
 	// Set global tracer provider
@@ -99,15 +99,6 @@ func Init(serviceName, serviceVersion, endpoint string) error {
 	Tracer = otel.Tracer(serviceName)
 
 	return nil
-}
-
-// getSampleRate returns trace sample rate from environment
-// Default: 1.0 (100%) for development
-// Production: set OTEL_TRACES_SAMPLER_ARG=0.1 for 10% sampling
-func getSampleRate() float64 {
-	// In production, you might want to sample less
-	// This can be configured via OTEL_TRACES_SAMPLER_ARG env var
-	return 1.0
 }
 
 // StartSpan starts a new span
