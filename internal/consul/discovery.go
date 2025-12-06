@@ -38,9 +38,9 @@ func NewDiscovery(consulAddress string, refreshInterval time.Duration) *Discover
 	}
 }
 
-// DiscoverServices queries Consul for healthy services by service name and world_id
+// DiscoverServices queries Consul for healthy services by service name, namespace, and world_id
 // Returns a map of world_id -> []ServiceEntry
-func (d *Discovery) DiscoverServices(ctx context.Context, serviceName string) (map[int][]ServiceEntry, error) {
+func (d *Discovery) DiscoverServices(ctx context.Context, serviceName, namespace string) (map[int][]ServiceEntry, error) {
 	// Query Consul health API: /v1/health/service/{service}?passing
 	url := fmt.Sprintf("%s/v1/health/service/%s?passing=true", d.consulAddress, serviceName)
 
@@ -72,9 +72,22 @@ func (d *Discovery) DiscoverServices(ctx context.Context, serviceName string) (m
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	// Group services by world_id
+	// Group services by world_id, filtering by namespace if specified
 	result := make(map[int][]ServiceEntry)
 	for _, entry := range entries {
+		// Filter by namespace if specified
+		if namespace != "" {
+			serviceNamespace := entry.Service.Meta["namespace"]
+			if serviceNamespace == "" {
+				// Fallback to pod_namespace for backward compatibility
+				serviceNamespace = entry.Service.Meta["pod_namespace"]
+			}
+			if serviceNamespace != namespace {
+				// Skip services from different namespace
+				continue
+			}
+		}
+
 		worldIDStr := entry.Service.Meta["world_id"]
 		if worldIDStr == "" {
 			// Skip services without world_id
@@ -104,16 +117,17 @@ func (d *Discovery) DiscoverServices(ctx context.Context, serviceName string) (m
 
 // StartRefreshLoop starts a background goroutine that periodically refreshes service discovery
 // and calls the callback with updated services
-func (d *Discovery) StartRefreshLoop(ctx context.Context, serviceName string, callback func(map[int][]ServiceEntry)) {
+func (d *Discovery) StartRefreshLoop(ctx context.Context, serviceName, namespace string, callback func(map[int][]ServiceEntry)) {
 	go func() {
 		ticker := time.NewTicker(d.refreshInterval)
 		defer ticker.Stop()
 
 		// Initial discovery
-		services, err := d.DiscoverServices(ctx, serviceName)
+		services, err := d.DiscoverServices(ctx, serviceName, namespace)
 		if err != nil {
 			logger.Error("initial Consul service discovery failed",
 				zap.String("service", serviceName),
+				zap.String("namespace", namespace),
 				zap.Error(err))
 		} else {
 			callback(services)
@@ -124,10 +138,11 @@ func (d *Discovery) StartRefreshLoop(ctx context.Context, serviceName string, ca
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				services, err := d.DiscoverServices(ctx, serviceName)
+				services, err := d.DiscoverServices(ctx, serviceName, namespace)
 				if err != nil {
 					logger.Error("Consul service discovery failed",
 						zap.String("service", serviceName),
+						zap.String("namespace", namespace),
 						zap.Error(err))
 					continue
 				}

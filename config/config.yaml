@@ -36,8 +36,10 @@ consul:
   enabled: true
   # Consul 地址（例如：http://14.103.46.72:30557）
   address: "http://14.103.46.72:30557"
-  # 要发现的服务名称（例如：gameserver）
-  service_name: "gameserver"
+  # 要发现的服务名称（例如：game）
+  service_name: "game"
+  # 命名空间过滤（例如：hgame），如果为空则发现所有命名空间的服务
+  namespace: "hgame"
   # 服务发现刷新间隔
   refresh_interval: 10s
 

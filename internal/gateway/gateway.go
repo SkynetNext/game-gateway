@@ -250,11 +250,13 @@ func (g *Gateway) Start(ctx context.Context) error {
 			g.consulDiscovery.StartRefreshLoop(
 				g.ctx,
 				g.config.Consul.ServiceName,
+				g.config.Consul.Namespace,
 				g.onConsulServicesUpdate,
 			)
 		}()
 		logger.Info("Consul service discovery enabled",
 			zap.String("service", g.config.Consul.ServiceName),
+			zap.String("namespace", g.config.Consul.Namespace),
 			zap.String("address", g.config.Consul.Address),
 			zap.Duration("refresh_interval", g.config.Consul.RefreshInterval))
 	}
@@ -448,7 +450,7 @@ func (g *Gateway) onRoutingRulesUpdate(rules map[int]*router.RoutingRule) {
 		// Trigger Consul refresh to update endpoints
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		services, err := g.consulDiscovery.DiscoverServices(ctx, g.config.Consul.ServiceName)
+		services, err := g.consulDiscovery.DiscoverServices(ctx, g.config.Consul.ServiceName, g.config.Consul.Namespace)
 		if err != nil {
 			logger.Error("failed to refresh Consul services after Redis update",
 				zap.Error(err))

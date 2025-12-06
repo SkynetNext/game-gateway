@@ -84,8 +84,12 @@ type ConsulConfig struct {
 	// Consul address (e.g., "http://14.103.46.72:30557")
 	Address string `yaml:"address"`
 
-	// Service name to discover (e.g., "gameserver")
+	// Service name to discover (e.g., "game")
 	ServiceName string `yaml:"service_name"`
+
+	// Namespace to filter services (e.g., "hgame")
+	// If empty, services from all namespaces will be discovered
+	Namespace string `yaml:"namespace"`
 
 	// Refresh interval for service discovery
 	RefreshInterval time.Duration `yaml:"refresh_interval"`
