@@ -22,6 +22,7 @@ import (
 	"github.com/SkynetNext/game-gateway/internal/buffer"
 	"github.com/SkynetNext/game-gateway/internal/circuitbreaker"
 	"github.com/SkynetNext/game-gateway/internal/config"
+	consul "github.com/SkynetNext/game-gateway/internal/consul"
 	"github.com/SkynetNext/game-gateway/internal/logger"
 	"github.com/SkynetNext/game-gateway/internal/metrics"
 	"github.com/SkynetNext/game-gateway/internal/middleware"
@@ -49,11 +50,17 @@ type Gateway struct {
 	gatewayName string
 
 	// Components
-	sessionManager *session.Manager
-	poolManager    *pool.Manager
-	grpcManager    *grpcmgr.Manager
-	router         *router.Router
-	redisClient    *redis.Client
+	sessionManager  *session.Manager
+	poolManager     *pool.Manager
+	grpcManager     *grpcmgr.Manager
+	router          *router.Router
+	redisClient     *redis.Client
+	consulDiscovery *consul.Discovery
+
+	// Routing rule configurations from Redis (without endpoints)
+	// Key: "serverType:worldID", Value: RoutingRule config (endpoints will be filled from Consul)
+	routingConfigs   map[string]*router.RoutingRule
+	routingConfigsMu sync.RWMutex
 
 	// Rate limiting and circuit breaking
 	rateLimiter     *ratelimit.Limiter
@@ -172,6 +179,7 @@ func New(cfg *config.Config, podName string) (*Gateway, error) {
 		circuitBreakers: make(map[string]*circuitbreaker.Breaker),
 		goroutinePool:   goroutinePool,
 		connQueue:       connQueue,
+		routingConfigs:  make(map[string]*router.RoutingRule),
 	}
 
 	if cfg.Server.UseGrpc {
@@ -194,6 +202,19 @@ func New(cfg *config.Config, podName string) (*Gateway, error) {
 		logger.Info("gRPC transport enabled", zap.String("gateway_name", gatewayName))
 	} else {
 		g.gatewayName = podName
+	}
+
+	// Initialize Consul service discovery (if enabled)
+	if cfg.Consul.Enabled && cfg.Consul.Address != "" {
+		refreshInterval := cfg.Consul.RefreshInterval
+		if refreshInterval == 0 {
+			refreshInterval = 10 * time.Second // Default refresh interval
+		}
+		g.consulDiscovery = consul.NewDiscovery(cfg.Consul.Address, refreshInterval)
+		logger.Info("Consul service discovery initialized",
+			zap.String("address", cfg.Consul.Address),
+			zap.String("service", cfg.Consul.ServiceName),
+			zap.Duration("refresh_interval", refreshInterval))
 	}
 
 	return g, nil
@@ -220,6 +241,23 @@ func (g *Gateway) Start(ctx context.Context) error {
 			g.onRealmMappingUpdate,
 		)
 	}()
+
+	// 2.5. Start Consul service discovery (if enabled)
+	if g.config.Consul.Enabled && g.consulDiscovery != nil {
+		g.wg.Add(1)
+		go func() {
+			defer g.wg.Done()
+			g.consulDiscovery.StartRefreshLoop(
+				g.ctx,
+				g.config.Consul.ServiceName,
+				g.onConsulServicesUpdate,
+			)
+		}()
+		logger.Info("Consul service discovery enabled",
+			zap.String("service", g.config.Consul.ServiceName),
+			zap.String("address", g.config.Consul.Address),
+			zap.Duration("refresh_interval", g.config.Consul.RefreshInterval))
+	}
 
 	// 3. Start connection pool cleanup
 	g.wg.Add(1)
@@ -342,14 +380,35 @@ func (g *Gateway) Shutdown(ctx context.Context) error {
 
 // loadConfigFromRedis loads initial configuration from Redis
 func (g *Gateway) loadConfigFromRedis(ctx context.Context) error {
-	// Load routing rules
+	// Load routing rules (configurations without endpoints)
 	rules, err := g.redisClient.LoadRoutingRules(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to load routing rules: %w", err)
 	}
+
+	// Store routing configurations (endpoints will be filled from Consul if enabled)
+	g.routingConfigsMu.Lock()
 	for _, rule := range rules {
-		g.router.UpdateRule(rule)
+		configKey := fmt.Sprintf("%d:%d", rule.ServerType, rule.WorldID)
+		config := &router.RoutingRule{
+			ServerType:  rule.ServerType,
+			ServiceName: rule.ServiceName,
+			Strategy:    rule.Strategy,
+			HashKey:     rule.HashKey,
+			WorldID:     rule.WorldID,
+			Endpoints:   nil, // Will be filled from Consul
+		}
+		g.routingConfigs[configKey] = config
 	}
+	g.routingConfigsMu.Unlock()
+
+	// If Consul is disabled, use endpoints from Redis (backward compatibility)
+	if !g.config.Consul.Enabled {
+		for _, rule := range rules {
+			g.router.UpdateRule(rule)
+		}
+	}
+	// If Consul is enabled, endpoints will be filled in onConsulServicesUpdate
 
 	// Realm mapping will be used when routing game requests
 	// It's loaded but not directly used here (used in routing logic)
@@ -358,14 +417,130 @@ func (g *Gateway) loadConfigFromRedis(ctx context.Context) error {
 }
 
 // onRoutingRulesUpdate handles routing rules updates from Redis
+// Redis stores routing configuration (serverType, serviceName, strategy, etc.) but NOT endpoints
+// Endpoints will be filled from Consul based on serviceName
 func (g *Gateway) onRoutingRulesUpdate(rules map[int]*router.RoutingRule) {
 	if rules == nil {
 		metrics.ConfigRefreshErrors.WithLabelValues("routing_rules").Inc()
 		logger.Warn("received nil routing rules, skipping update")
 		return
 	}
+
+	// Update routing configurations (without endpoints)
+	g.routingConfigsMu.Lock()
 	for _, rule := range rules {
-		g.router.UpdateRule(rule)
+		// Create a copy without endpoints
+		configKey := fmt.Sprintf("%d:%d", rule.ServerType, rule.WorldID)
+		config := &router.RoutingRule{
+			ServerType:  rule.ServerType,
+			ServiceName: rule.ServiceName,
+			Strategy:    rule.Strategy,
+			HashKey:     rule.HashKey,
+			WorldID:     rule.WorldID,
+			Endpoints:   nil, // Endpoints will be filled from Consul
+		}
+		g.routingConfigs[configKey] = config
+	}
+	g.routingConfigsMu.Unlock()
+
+	// If Consul is enabled, trigger service discovery to fill endpoints
+	if g.config.Consul.Enabled && g.consulDiscovery != nil {
+		// Trigger Consul refresh to update endpoints
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		services, err := g.consulDiscovery.DiscoverServices(ctx, g.config.Consul.ServiceName)
+		if err != nil {
+			logger.Error("failed to refresh Consul services after Redis update",
+				zap.Error(err))
+		} else {
+			g.mergeConsulEndpoints(services)
+		}
+	} else {
+		// If Consul is disabled, use endpoints from Redis (backward compatibility)
+		for _, rule := range rules {
+			g.router.UpdateRule(rule)
+		}
+	}
+}
+
+// onConsulServicesUpdate handles Consul service discovery updates
+// Merges Consul endpoints with Redis routing configurations
+func (g *Gateway) onConsulServicesUpdate(services map[int][]consul.ServiceEntry) {
+	if services == nil {
+		logger.Warn("received nil Consul services, skipping update")
+		return
+	}
+
+	g.mergeConsulEndpoints(services)
+}
+
+// mergeConsulEndpoints merges Consul service endpoints with Redis routing configurations
+func (g *Gateway) mergeConsulEndpoints(services map[int][]consul.ServiceEntry) {
+	g.routingConfigsMu.RLock()
+	defer g.routingConfigsMu.RUnlock()
+
+	// Update routing rules for each world_id found in Consul
+	for worldID, entries := range services {
+		if len(entries) == 0 {
+			continue
+		}
+
+		// Build endpoints list from Consul service entries
+		endpoints := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			endpoint := fmt.Sprintf("%s:%d", entry.Address, entry.Port)
+			endpoints = append(endpoints, endpoint)
+		}
+
+		// Find matching routing configuration from Redis
+		// Try to find config for each serverType that matches this worldID
+		// We need to match by serviceName from Consul (which is "gameserver")
+		matched := false
+		for _, config := range g.routingConfigs {
+			// Check if this config matches the worldID and serviceName
+			if config.WorldID == worldID || (config.WorldID == 0 && worldID > 0) {
+				// Check if serviceName matches (if specified in config)
+				if config.ServiceName == "" || config.ServiceName == g.config.Consul.ServiceName {
+					// Merge: use config from Redis, but endpoints from Consul
+					rule := &router.RoutingRule{
+						ServerType:  config.ServerType,
+						ServiceName: config.ServiceName,
+						Strategy:    config.Strategy,
+						HashKey:     config.HashKey,
+						WorldID:     worldID,
+						Endpoints:   endpoints, // From Consul
+					}
+
+					g.router.UpdateRule(rule)
+					matched = true
+					logger.Info("merged routing rule: Redis config + Consul endpoints",
+						zap.Int("server_type", config.ServerType),
+						zap.Int("world_id", worldID),
+						zap.String("service_name", config.ServiceName),
+						zap.String("strategy", string(config.Strategy)),
+						zap.Int("endpoints_count", len(endpoints)),
+						zap.Strings("endpoints", endpoints))
+				}
+			}
+		}
+
+		// If no matching config found, log warning but still create a default rule
+		if !matched {
+			logger.Warn("no Redis routing config found for Consul services, using defaults",
+				zap.Int("world_id", worldID),
+				zap.String("service_name", g.config.Consul.ServiceName))
+
+			// Use default configuration (GameServer serverType is 200)
+			const gameServerType = 200
+			rule := &router.RoutingRule{
+				ServerType:  gameServerType,
+				ServiceName: g.config.Consul.ServiceName,
+				Strategy:    router.StrategyRoundRobin,
+				Endpoints:   endpoints,
+				WorldID:     worldID,
+			}
+			g.router.UpdateRule(rule)
+		}
 	}
 }
 

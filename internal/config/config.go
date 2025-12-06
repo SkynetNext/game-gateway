@@ -16,6 +16,9 @@ type Config struct {
 	// Redis configuration
 	Redis RedisConfig `yaml:"redis"`
 
+	// Consul configuration (optional, for service discovery)
+	Consul ConsulConfig `yaml:"consul"`
+
 	// Backend service configuration
 	Backend BackendConfig `yaml:"backend"`
 
@@ -74,6 +77,21 @@ type RedisConfig struct {
 	DialTimeout  time.Duration `yaml:"dial_timeout"`
 	ReadTimeout  time.Duration `yaml:"read_timeout"`
 	WriteTimeout time.Duration `yaml:"write_timeout"`
+}
+
+// ConsulConfig represents Consul service discovery configuration
+type ConsulConfig struct {
+	// Consul address (e.g., "http://14.103.46.72:30557")
+	Address string `yaml:"address"`
+
+	// Service name to discover (e.g., "gameserver")
+	ServiceName string `yaml:"service_name"`
+
+	// Refresh interval for service discovery
+	RefreshInterval time.Duration `yaml:"refresh_interval"`
+
+	// Enable Consul service discovery
+	Enabled bool `yaml:"enabled"`
 }
 
 // BackendConfig represents backend service configuration

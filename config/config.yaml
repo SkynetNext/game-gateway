@@ -31,6 +31,16 @@ backend:
   version_service: "version-server.hgame.svc.cluster.local:8080"
   game_service: "game-server.hgame.svc.cluster.local:8080"
 
+consul:
+  # Consul 服务发现配置（可选）
+  enabled: true
+  # Consul 地址（例如：http://14.103.46.72:30557）
+  address: "http://14.103.46.72:30557"
+  # 要发现的服务名称（例如：gameserver）
+  service_name: "gameserver"
+  # 服务发现刷新间隔
+  refresh_interval: 10s
+
 routing:
   # 路由规则刷新间隔
   refresh_interval: 10s
