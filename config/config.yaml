@@ -1,4 +1,4 @@
-# Game Gateway 配置文件
+# Game Gateway Configuration File
 
 server:
   listen_addr: ":8080"
@@ -13,8 +13,8 @@ server:
   use_grpc: true
 
 redis:
-  # Redis 地址：生产环境使用 K8s 集群内 Redis
-  # 开发环境可改为 localhost:6379
+  # Redis address: use K8s cluster-internal Redis in production
+  # For development, can be changed to localhost:6379
   addr: "10.1.0.8:6379"
   password: ""
   db: 0
@@ -32,57 +32,57 @@ backend:
   game_service: "game-server.hgame.svc.cluster.local:8080"
 
 consul:
-  # Consul 服务发现配置（可选）
+  # Consul service discovery configuration (optional)
   enabled: true
-  # Consul 地址（例如：http://14.103.46.72:30557）
-  address: "http://14.103.46.72:30557"
-  # 要发现的服务名称（例如：game）
+  # Consul address (using Consul Client Service, follows Kubernetes best practices)
+  address: "http://consul-client.infrastructure.svc.cluster.local:8500"
+  # Service name to discover (e.g., "game")
   service_name: "game"
-  # 命名空间过滤（例如：hgame），如果为空则发现所有命名空间的服务
+  # Namespace filter (e.g., "hgame"), if empty will discover services from all namespaces
   namespace: "hgame"
-  # 服务发现刷新间隔
+  # Service discovery refresh interval
   refresh_interval: 10s
 
 routing:
-  # 路由规则刷新间隔
+  # Routing rules refresh interval
   refresh_interval: 10s
-  # Realm 映射刷新间隔
+  # Realm mapping refresh interval
   realm_refresh_interval: 5s
 
 connection_pool:
-  # 最大连接数
+  # Maximum number of connections
   max_connections: 1000
-  # 每个服务的最大连接数
+  # Maximum connections per service
   max_connections_per_service: 100
-  # 连接空闲超时
+  # Connection idle timeout
   idle_timeout: 5m
-  # 连接建立超时
+  # Connection establishment timeout
   dial_timeout: 5s
-  # 连接读取超时
+  # Connection read timeout
   read_timeout: 30s
-  # 连接写入超时
+  # Connection write timeout
   write_timeout: 30s
-  # 连接重试次数
+  # Connection retry count
   max_retries: 3
-  # 重试延迟
+  # Retry delay
   retry_delay: 100ms
 
-# 安全配置
+# Security configuration
 security:
-  # 最大消息大小（字节），防止 DoS 攻击
+  # Maximum message size (bytes), prevents DoS attacks
   max_message_size: 1048576 # 1MB
-  # 每个 IP 的最大连接数
+  # Maximum connections per IP
   max_connections_per_ip: 10
-  # 每个 IP 的连接速率限制（每秒连接数）
+  # Connection rate limit per IP (connections per second)
   connection_rate_limit: 5
 
-# 追踪配置
+# Tracing configuration
 tracing:
-  # 是否启用 Trace ID 传播到后端服务
-  # ⚠️ 警告：启用此选项需要后端服务支持扩展的 GateMsgHeader 格式（33 字节）
-  # 如果禁用（默认），使用原始格式（9 字节），与现有 cluster 完全兼容
-  # 默认：false（禁用，保持兼容性）
+  # Whether to enable Trace ID propagation to backend services
+  # ⚠️ Warning: Enabling this requires backend services to support extended GateMsgHeader format (33 bytes)
+  # If disabled (default), uses original format (9 bytes), fully compatible with existing cluster
+  # Default: false (disabled, maintains compatibility)
   enable_trace_propagation: true
 
-# 优雅关闭超时
+# Graceful shutdown timeout
 graceful_shutdown_timeout: 30s
