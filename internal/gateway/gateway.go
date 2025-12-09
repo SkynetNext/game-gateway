@@ -205,16 +205,25 @@ func New(cfg *config.Config, podName string) (*Gateway, error) {
 	}
 
 	// Initialize Consul service discovery (if enabled)
-	if cfg.Consul.Enabled && cfg.Consul.Address != "" {
-		refreshInterval := cfg.Consul.RefreshInterval
-		if refreshInterval == 0 {
-			refreshInterval = 10 * time.Second // Default refresh interval
+	if cfg.Consul.Enabled {
+		// Use NODE_IP environment variable to access node-local Consul client
+		nodeIP := os.Getenv("NODE_IP")
+		if nodeIP == "" {
+			logger.Warn("Consul is enabled but NODE_IP environment variable is not set, skipping Consul discovery")
+		} else {
+			// Use node IP with Consul client port (8500)
+			consulAddress := fmt.Sprintf("http://%s:8500", nodeIP)
+			refreshInterval := cfg.Consul.RefreshInterval
+			if refreshInterval == 0 {
+				refreshInterval = 10 * time.Second // Default refresh interval
+			}
+			g.consulDiscovery = consul.NewDiscovery(consulAddress, refreshInterval)
+			logger.Info("Consul service discovery initialized",
+				zap.String("node_ip", nodeIP),
+				zap.String("address", consulAddress),
+				zap.String("service", cfg.Consul.ServiceName),
+				zap.Duration("refresh_interval", refreshInterval))
 		}
-		g.consulDiscovery = consul.NewDiscovery(cfg.Consul.Address, refreshInterval)
-		logger.Info("Consul service discovery initialized",
-			zap.String("address", cfg.Consul.Address),
-			zap.String("service", cfg.Consul.ServiceName),
-			zap.Duration("refresh_interval", refreshInterval))
 	}
 
 	return g, nil
@@ -254,10 +263,13 @@ func (g *Gateway) Start(ctx context.Context) error {
 				g.onConsulServicesUpdate,
 			)
 		}()
+		nodeIP := os.Getenv("NODE_IP")
+		consulAddress := fmt.Sprintf("http://%s:8500", nodeIP)
 		logger.Info("Consul service discovery enabled",
 			zap.String("service", g.config.Consul.ServiceName),
 			zap.String("namespace", g.config.Consul.Namespace),
-			zap.String("address", g.config.Consul.Address),
+			zap.String("node_ip", nodeIP),
+			zap.String("address", consulAddress),
 			zap.Duration("refresh_interval", g.config.Consul.RefreshInterval))
 	}
 

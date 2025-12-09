@@ -34,8 +34,8 @@ backend:
 consul:
   # Consul service discovery configuration (optional)
   enabled: true
-  # Consul address (using Consul Client Service, follows Kubernetes best practices)
-  address: "http://consul-client.infrastructure.svc.cluster.local:8500"
+  # Consul address is constructed from NODE_IP environment variable: http://{NODE_IP}:8500
+  # NODE_IP is automatically set via Kubernetes Downward API (status.hostIP)
   # Service name to discover (e.g., "game")
   service_name: "game"
   # Namespace filter (e.g., "hgame"), if empty will discover services from all namespaces

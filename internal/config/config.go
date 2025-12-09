@@ -81,9 +81,6 @@ type RedisConfig struct {
 
 // ConsulConfig represents Consul service discovery configuration
 type ConsulConfig struct {
-	// Consul address (e.g., "http://14.103.46.72:30557")
-	Address string `yaml:"address"`
-
 	// Service name to discover (e.g., "game")
 	ServiceName string `yaml:"service_name"`
 
