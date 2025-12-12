@@ -37,13 +37,7 @@ var (
 		Help: "Total number of routing errors",
 	}, []string{"error_type"})
 
-	// Rate limiting metrics
-	RateLimitRejected = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "game_gateway_rate_limit_rejected_total",
-		Help: "Total number of connections rejected by rate limiter",
-	})
-
-	// Connection rejection metrics
+	// Connection rejection metrics (includes rate limiting)
 	ConnectionRejected = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "game_gateway_connection_rejected_total",
 		Help: "Total number of connections rejected",
@@ -88,11 +82,6 @@ var (
 		Help: "Total number of backend request retries",
 	}, []string{"backend"})
 
-	BackendHealthStatus = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "game_gateway_backend_health_status",
-		Help: "Backend health status (1=healthy, 0=unhealthy)",
-	}, []string{"backend"})
-
 	BackendBytesTransmitted = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "game_gateway_backend_bytes_transmitted_total",
 		Help: "Total bytes transmitted to backend",
@@ -135,11 +124,6 @@ var (
 		Help: "Current number of goroutines",
 	})
 
-	MemoryAllocBytes = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "game_gateway_memory_alloc_bytes",
-		Help: "Bytes of allocated heap objects",
-	})
-
 	MemorySysBytes = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "game_gateway_memory_sys_bytes",
 		Help: "Total bytes of memory obtained from the OS",
@@ -177,7 +161,6 @@ func UpdateResourceMetrics() {
 	runtime.ReadMemStats(&m)
 
 	GoroutinesCount.Set(float64(runtime.NumGoroutine()))
-	MemoryAllocBytes.Set(float64(m.Alloc))
 	MemorySysBytes.Set(float64(m.Sys))
 	MemoryHeapAllocBytes.Set(float64(m.HeapAlloc))
 	MemoryHeapInuseBytes.Set(float64(m.HeapInuse))

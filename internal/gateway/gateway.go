@@ -804,7 +804,7 @@ func (g *Gateway) handleConnection(ctx context.Context, conn net.Conn) {
 
 	// IP-based rate limiting: check if connection from this IP is allowed
 	if !g.ipLimiter.Allow(ip) {
-		metrics.RateLimitRejected.Inc()
+		metrics.IncConnectionRejected("ip_rate_limit")
 		connStats.status = "rejected"
 		connStats.errorMsg = "IP rate limit exceeded"
 		return
@@ -813,7 +813,7 @@ func (g *Gateway) handleConnection(ctx context.Context, conn net.Conn) {
 
 	// Global rate limiting: check if connection is allowed
 	if !g.rateLimiter.Allow() {
-		metrics.RateLimitRejected.Inc()
+		metrics.IncConnectionRejected("global_rate_limit")
 		connStats.status = "rejected"
 		connStats.errorMsg = "connection rate limit exceeded"
 		return
