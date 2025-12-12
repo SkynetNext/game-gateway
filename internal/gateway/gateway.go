@@ -1077,6 +1077,9 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 
 	routeSpan.SetAttributes(attribute.String("backend.address", backendAddr))
 
+	// Record backend request attempt
+	backendRequestStart := time.Now()
+
 	// Check circuit breaker
 	breaker := g.getOrCreateBreaker(backendAddr)
 	if !breaker.Allow() {
@@ -1084,6 +1087,8 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 		routeSpan.SetStatus(codes.Error, "circuit breaker open")
 		routeSpan.End()
 		metrics.RoutingErrors.WithLabelValues("circuit_breaker_open").Inc()
+		metrics.BackendRequestsTotal.WithLabelValues(backendAddr, "error").Inc()
+		metrics.BackendErrorsTotal.WithLabelValues(backendAddr, "circuit_breaker_open").Inc()
 		connStats.status = "error"
 		connStats.errorMsg = "circuit breaker open"
 		connStats.backendAddr = backendAddr
@@ -1094,6 +1099,8 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 
 	// Get connection from pool with retry (only for TCP mode)
 	var backendConn *pool.Connection
+	var connectionStartTime time.Time
+	retryCount := 0
 
 	if !g.config.Server.UseGrpc {
 		retryCfg := retry.RetryConfig{
@@ -1101,12 +1108,28 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 			RetryDelay: g.config.ConnectionPool.RetryDelay,
 		}
 		err = retry.Do(ctx, retryCfg, func() error {
+			if retryCount > 0 {
+				metrics.BackendRetriesTotal.WithLabelValues(backendAddr).Inc()
+			}
+			retryCount++
+
+			connectionStartTime = time.Now()
 			var err error
 			backendConn, err = g.poolManager.GetConnection(ctx, backendAddr)
 			if err == nil {
+				// Record connection latency
+				connectionLatency := time.Since(connectionStartTime)
+				metrics.BackendConnectionLatency.WithLabelValues(backendAddr).Observe(connectionLatency.Seconds())
 				breaker.RecordSuccess()
 			} else {
 				breaker.RecordFailure()
+				// Record connection error
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					metrics.BackendTimeoutsTotal.WithLabelValues(backendAddr).Inc()
+					metrics.BackendErrorsTotal.WithLabelValues(backendAddr, "timeout").Inc()
+				} else {
+					metrics.BackendErrorsTotal.WithLabelValues(backendAddr, "connection_failed").Inc()
+				}
 			}
 			return err
 		})
@@ -1115,6 +1138,7 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 			routeSpan.SetStatus(codes.Error, "connection failed")
 			routeSpan.End()
 			metrics.RoutingErrors.WithLabelValues("connection_failed").Inc()
+			metrics.BackendRequestsTotal.WithLabelValues(backendAddr, "error").Inc()
 			connStats.status = "error"
 			connStats.errorMsg = fmt.Sprintf("backend connection failed: %v", err)
 			connStats.sessionID = sessionID
@@ -1129,10 +1153,14 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 	routeSpan.SetStatus(codes.Ok, "routed")
 	routeSpan.End()
 
+	// Record successful backend request
+	metrics.BackendRequestsTotal.WithLabelValues(backendAddr, "success").Inc()
+
 	// Notify backend server that client has connected (best practice)
 	clientIP := extractIP(remoteAddr)
 	if err := g.notifyBackendClientConnect(ctx, backendAddr, sessionID, clientIP, "tcp"); err != nil {
 		// Connection notification failed, reject this connection
+		metrics.BackendErrorsTotal.WithLabelValues(backendAddr, "notification_failed").Inc()
 		connStats.status = "error"
 		connStats.errorMsg = fmt.Sprintf("notify connect failed: %v", err)
 		connStats.sessionID = sessionID
@@ -1164,9 +1192,13 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 		}
 	}()
 
-	// Record request latency
+	// Record request latency (frontend)
 	latency := time.Since(startTime)
 	metrics.RequestLatency.WithLabelValues(fmt.Sprintf("%d", serverType)).Observe(latency.Seconds())
+
+	// Record backend request latency (end-to-end from routing start)
+	backendLatency := time.Since(backendRequestStart)
+	metrics.BackendRequestLatency.WithLabelValues(backendAddr).Observe(backendLatency.Seconds())
 
 	// Extract Trace ID and Span ID for propagation
 	var traceContext map[string]string
@@ -1289,6 +1321,9 @@ func extractTraceContext(ctx context.Context) map[string]string {
 
 // forwardConnection forwards data bidirectionally between client and backend
 func (g *Gateway) forwardConnection(ctx context.Context, sess *session.Session, log *logger.ContextLogger, bytesIn, bytesOut *int64) {
+	// Get backend address from connection
+	backendAddr := sess.BackendConn.RemoteAddr().String()
+
 	// Create span for connection forwarding
 	ctx, span := tracing.StartSpan(ctx, "gateway.forward_connection")
 	defer func() {
@@ -1303,7 +1338,7 @@ func (g *Gateway) forwardConnection(ctx context.Context, sess *session.Session, 
 	span.SetAttributes(
 		attribute.Int64("session.id", sess.SessionID),
 		attribute.String("client.address", sess.ClientConn.RemoteAddr().String()),
-		attribute.String("backend.address", sess.BackendConn.RemoteAddr().String()),
+		attribute.String("backend.address", backendAddr),
 	)
 
 	// Get timeouts from config (thread-safe read)
@@ -1355,7 +1390,10 @@ func (g *Gateway) forwardConnection(ctx context.Context, sess *session.Session, 
 				}
 
 				// Track bytes
-				atomic.AddInt64(bytesIn, int64(len(messageData)))
+				messageSize := int64(len(messageData))
+				atomic.AddInt64(bytesIn, messageSize)
+				// Record backend bytes transmitted (request direction)
+				metrics.BackendBytesTransmitted.WithLabelValues(backendAddr, "request").Add(float64(messageSize))
 
 				var pooledBuf []byte
 				if messageData != nil && cap(messageData) >= 8192 {
@@ -1451,7 +1489,10 @@ func (g *Gateway) forwardConnection(ctx context.Context, sess *session.Session, 
 			}
 
 			// Track bytes
-			atomic.AddInt64(bytesOut, int64(messageDataLen))
+			responseSize := int64(messageDataLen)
+			atomic.AddInt64(bytesOut, responseSize)
+			// Record backend bytes transmitted (response direction)
+			metrics.BackendBytesTransmitted.WithLabelValues(backendAddr, "response").Add(float64(responseSize))
 
 			if err := sess.ClientConn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
 				if pooledBuf != nil {

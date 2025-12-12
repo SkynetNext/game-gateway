@@ -47,18 +47,50 @@ var (
 		Help: "Circuit breaker state (0=closed, 1=open, 2=half-open)",
 	}, []string{"backend"})
 
-	// Backend connection pool metrics
-	BackendPoolActive = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "game_gateway_backend_pool_active",
-		Help: "Number of active backend connections in pool",
+	// Backend/Upstream metrics
+	BackendRequestsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "game_gateway_backend_requests_total",
+		Help: "Total number of requests to backend services",
+	}, []string{"backend", "status"})
+
+	BackendRequestLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "game_gateway_backend_request_latency_seconds",
+		Help:    "Backend request latency in seconds (end-to-end)",
+		Buckets: prometheus.ExponentialBuckets(0.001, 2, 12), // 1ms to 4s
 	}, []string{"backend"})
 
-	BackendPoolIdle = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "game_gateway_backend_pool_idle",
-		Help: "Number of idle backend connections in pool",
+	BackendConnectionLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "game_gateway_backend_connection_latency_seconds",
+		Help:    "Backend connection establishment latency in seconds",
+		Buckets: prometheus.ExponentialBuckets(0.001, 2, 10), // 1ms to 1s
 	}, []string{"backend"})
 
-	// Request latency
+	BackendErrorsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "game_gateway_backend_errors_total",
+		Help: "Total number of backend errors",
+	}, []string{"backend", "error_type"})
+
+	BackendTimeoutsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "game_gateway_backend_timeouts_total",
+		Help: "Total number of backend request timeouts",
+	}, []string{"backend"})
+
+	BackendRetriesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "game_gateway_backend_retries_total",
+		Help: "Total number of backend request retries",
+	}, []string{"backend"})
+
+	BackendHealthStatus = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "game_gateway_backend_health_status",
+		Help: "Backend health status (1=healthy, 0=unhealthy)",
+	}, []string{"backend"})
+
+	BackendBytesTransmitted = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "game_gateway_backend_bytes_transmitted_total",
+		Help: "Total bytes transmitted to backend",
+	}, []string{"backend", "direction"})
+
+	// Request latency (frontend)
 	RequestLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "game_gateway_request_latency_seconds",
 		Help:    "Request latency in seconds",
