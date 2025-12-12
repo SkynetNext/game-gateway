@@ -1,8 +1,6 @@
 package metrics
 
 import (
-	"runtime"
-
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -117,37 +115,6 @@ var (
 		Name: "game_gateway_config_refresh_success_total",
 		Help: "Total number of successful configuration refreshes",
 	}, []string{"config_type"})
-
-	// Resource utilization metrics
-	GoroutinesCount = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "game_gateway_goroutines_count",
-		Help: "Current number of goroutines",
-	})
-
-	MemorySysBytes = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "game_gateway_memory_sys_bytes",
-		Help: "Total bytes of memory obtained from the OS",
-	})
-
-	MemoryHeapAllocBytes = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "game_gateway_memory_heap_alloc_bytes",
-		Help: "Bytes of allocated heap objects",
-	})
-
-	MemoryHeapInuseBytes = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "game_gateway_memory_heap_inuse_bytes",
-		Help: "Bytes in in-use spans",
-	})
-
-	GCPauseTotalSeconds = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "game_gateway_gc_pause_total_seconds",
-		Help: "Total GC pause time in seconds",
-	})
-
-	GCCount = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "game_gateway_gc_count_total",
-		Help: "Total number of GC runs",
-	})
 )
 
 // IncConnectionRejected increments the connection rejected counter
@@ -155,15 +122,12 @@ func IncConnectionRejected(reason string) {
 	ConnectionRejected.WithLabelValues(reason).Inc()
 }
 
-// UpdateResourceMetrics updates resource utilization metrics
-func UpdateResourceMetrics() {
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-
-	GoroutinesCount.Set(float64(runtime.NumGoroutine()))
-	MemorySysBytes.Set(float64(m.Sys))
-	MemoryHeapAllocBytes.Set(float64(m.HeapAlloc))
-	MemoryHeapInuseBytes.Set(float64(m.HeapInuse))
-	GCPauseTotalSeconds.Add(float64(m.PauseTotalNs) / 1e9)
-	GCCount.Add(float64(m.NumGC))
-}
+// Note: Resource utilization metrics (goroutines, memory, GC) are provided
+// by the Prometheus Go client library as standard metrics:
+// - go_goroutines
+// - go_memstats_alloc_bytes
+// - go_memstats_heap_inuse_bytes
+// - go_memstats_sys_bytes
+// - go_memstats_gc_pause_seconds_total
+// - go_memstats_gc_count_total
+// These metrics are automatically collected without STW pauses.

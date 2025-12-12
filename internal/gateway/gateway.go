@@ -309,7 +309,7 @@ func (g *Gateway) Start(ctx context.Context) error {
 	middleware.InitAccessLogger(true)
 
 	// 7. Start metrics and health check server
-	if err := g.startMetricsServer(g.ctx); err != nil {
+	if err := g.startMetricsServer(); err != nil {
 		return fmt.Errorf("failed to start metrics server: %w", err)
 	}
 
@@ -576,7 +576,7 @@ func (g *Gateway) onRealmMappingUpdate(mapping map[int32]string) {
 }
 
 // startMetricsServer starts the metrics and health check HTTP server
-func (g *Gateway) startMetricsServer(ctx context.Context) error {
+func (g *Gateway) startMetricsServer() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", g.healthHandler)
 	mux.HandleFunc("/ready", g.readyHandler)
@@ -595,33 +595,9 @@ func (g *Gateway) startMetricsServer(ctx context.Context) error {
 		}
 	}()
 
-	// Start resource metrics updater
-	g.wg.Add(1)
-	go g.resourceMetricsUpdater(ctx)
-
 	logger.Info("metrics server started", zap.Int("port", g.config.Server.HealthCheckPort))
 
 	return nil
-}
-
-// resourceMetricsUpdater periodically updates resource utilization metrics
-func (g *Gateway) resourceMetricsUpdater(ctx context.Context) {
-	defer g.wg.Done()
-
-	ticker := time.NewTicker(15 * time.Second) // Update every 15 seconds
-	defer ticker.Stop()
-
-	// Update immediately on start
-	metrics.UpdateResourceMetrics()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			metrics.UpdateResourceMetrics()
-		}
-	}
 }
 
 // startListener starts the business listener

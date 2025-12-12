@@ -41,7 +41,7 @@ Game Gateway provides comprehensive observability through structured logging, Pr
          ▼     ▼      ▼           │                    │
     ┌────────┐ ┌────┐ ┌────┐     │                    │
     │  Loki  │ │ ES │ │ S3 │     │                    │
-    │ (实时) │ │(分析)│ │(归档)│     │                    │
+    │(realtime)│ │(analytics)│ │(archive)│     │                    │
     └────┬───┘ └─┬──┘ └────┘     │                    │
          │       │                │                    │
          └───────┴────────────────┼────────────────────┘
@@ -198,16 +198,18 @@ Fluent Bit is chosen over Promtail for enterprise-grade log collection:
 
 #### Resource Utilization Metrics
 
+Resource utilization metrics are provided by the Prometheus Go client library as standard metrics (no STW pauses):
+
 | Metric | Type | Description | Labels |
 |--------|------|-------------|--------|
-| `game_gateway_goroutines_count` | Gauge | Current number of goroutines | - |
-| `game_gateway_memory_heap_alloc_bytes` | Gauge | Bytes of allocated heap objects | - |
-| `game_gateway_memory_heap_inuse_bytes` | Gauge | Bytes in in-use spans | - |
-| `game_gateway_memory_sys_bytes` | Gauge | Total bytes of memory obtained from OS | - |
-| `game_gateway_gc_pause_total_seconds` | Counter | Total GC pause time in seconds | - |
-| `game_gateway_gc_count_total` | Counter | Total number of GC runs | - |
+| `go_goroutines` | Gauge | Current number of goroutines | - |
+| `go_memstats_alloc_bytes` | Gauge | Bytes of allocated heap objects | - |
+| `go_memstats_heap_inuse_bytes` | Gauge | Bytes in in-use spans | - |
+| `go_memstats_sys_bytes` | Gauge | Total bytes of memory obtained from OS | - |
+| `go_memstats_gc_pause_seconds_total` | Counter | Total GC pause time in seconds | - |
+| `go_memstats_gc_count_total` | Counter | Total number of GC runs | - |
 
-**Note**: Standard Go runtime metrics (`go_memstats_*`, `process_resident_memory_bytes`) are also available via Prometheus Go client.
+**Note**: These metrics are automatically collected by the Prometheus Go client without causing Stop-The-World (STW) pauses, unlike custom `runtime.ReadMemStats()` calls.
 
 ### Example Queries
 
@@ -271,19 +273,21 @@ sum(game_gateway_backend_connections_active) by (backend)
 #### Goroutines Count
 
 ```promql
-game_gateway_goroutines_count
+go_goroutines{job="game-gateway"}
 ```
 
 #### Memory Usage
 
 ```promql
-game_gateway_memory_heap_alloc_bytes
+go_memstats_heap_alloc_bytes{job="game-gateway"}
+go_memstats_heap_inuse_bytes{job="game-gateway"}
+go_memstats_sys_bytes{job="game-gateway"}
 ```
 
 #### GC Rate
 
 ```promql
-rate(game_gateway_gc_count_total[1m])
+rate(go_memstats_gc_count_total{job="game-gateway"}[1m])
 ```
 
 #### Config Refresh Success Rate
@@ -619,9 +623,9 @@ readinessProbe:
 
 ## Metrics Summary
 
-### Total Metrics: 24
+### Total Metrics: 18 (Custom) + 6 (Go Runtime)
 
-**By Category**:
+**Custom Metrics (18)**:
 - Frontend Connection: 3 metrics (connections_active, connections_total, connection_rejected_total)
 - Backend/Upstream: 9 metrics (connections, requests, latency, errors, timeouts, retries, health, bytes)
 - Session: 1 metric (sessions_active)
@@ -629,7 +633,9 @@ readinessProbe:
 - Circuit Breaker: 1 metric (circuit_breaker_state)
 - Message Processing: 1 metric (messages_processed_total)
 - Configuration: 3 metrics (config_refresh_success/errors, pool_cleanup_errors)
-- Resource Utilization: 4 metrics (goroutines, memory_heap_alloc/inuse, gc_pause/count)
+
+**Go Runtime Metrics (6, auto-collected, no STW)**:
+- Resource Utilization: `go_goroutines`, `go_memstats_alloc_bytes`, `go_memstats_heap_inuse_bytes`, `go_memstats_sys_bytes`, `go_memstats_gc_pause_seconds_total`, `go_memstats_gc_count_total`
 
 ### Coverage Comparison
 
@@ -745,6 +751,12 @@ readinessProbe:
 
 ## Dashboard Optimization History
 
+### v2.1 (2025-12-12) - Performance Optimization
+- **Removed STW risk**: Eliminated `runtime.ReadMemStats()` calls
+- **Updated resource metrics**: Switched to `go_memstats_*` and `go_goroutines` (auto-collected, no STW)
+- **Reduced custom metrics**: 24 → 18 (removed 6 redundant resource metrics)
+- **Zero performance impact**: Resource metrics now collected without Stop-The-World pauses
+
 ### v2.0 (2025-12-12) - 16 Core Panels
 - **Reduced panels**: 29 → 16 (45% reduction)
 - **Improved layout**: 7-row logical grouping (KPI → Trends → Latency → Errors → Backend → Resources → Operations)
@@ -759,5 +771,5 @@ readinessProbe:
 ---
 
 **Last Updated**: 2025-12-12
-**Dashboard Version**: v2.0
+**Dashboard Version**: v2.1
 
