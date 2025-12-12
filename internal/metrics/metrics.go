@@ -1,6 +1,8 @@
 package metrics
 
 import (
+	"runtime"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -16,6 +18,12 @@ var (
 		Name: "game_gateway_connections_total",
 		Help: "Total number of client connections",
 	})
+
+	// Backend active connections (按后端分组)
+	BackendConnectionsActive = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "game_gateway_backend_connections_active",
+		Help: "Number of active connections to backend services",
+	}, []string{"backend"})
 
 	// Session metrics
 	ActiveSessions = promauto.NewGauge(prometheus.GaugeOpts{
@@ -114,9 +122,65 @@ var (
 		Name: "game_gateway_pool_cleanup_errors_total",
 		Help: "Total number of connection pool cleanup errors",
 	})
+
+	// Configuration refresh success metrics
+	ConfigRefreshSuccess = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "game_gateway_config_refresh_success_total",
+		Help: "Total number of successful configuration refreshes",
+	}, []string{"config_type"})
+
+	// Resource utilization metrics
+	GoroutinesCount = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "game_gateway_goroutines_count",
+		Help: "Current number of goroutines",
+	})
+
+	MemoryAllocBytes = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "game_gateway_memory_alloc_bytes",
+		Help: "Bytes of allocated heap objects",
+	})
+
+	MemorySysBytes = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "game_gateway_memory_sys_bytes",
+		Help: "Total bytes of memory obtained from the OS",
+	})
+
+	MemoryHeapAllocBytes = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "game_gateway_memory_heap_alloc_bytes",
+		Help: "Bytes of allocated heap objects",
+	})
+
+	MemoryHeapInuseBytes = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "game_gateway_memory_heap_inuse_bytes",
+		Help: "Bytes in in-use spans",
+	})
+
+	GCPauseTotalSeconds = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "game_gateway_gc_pause_total_seconds",
+		Help: "Total GC pause time in seconds",
+	})
+
+	GCCount = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "game_gateway_gc_count_total",
+		Help: "Total number of GC runs",
+	})
 )
 
 // IncConnectionRejected increments the connection rejected counter
 func IncConnectionRejected(reason string) {
 	ConnectionRejected.WithLabelValues(reason).Inc()
+}
+
+// UpdateResourceMetrics updates resource utilization metrics
+func UpdateResourceMetrics() {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+
+	GoroutinesCount.Set(float64(runtime.NumGoroutine()))
+	MemoryAllocBytes.Set(float64(m.Alloc))
+	MemorySysBytes.Set(float64(m.Sys))
+	MemoryHeapAllocBytes.Set(float64(m.HeapAlloc))
+	MemoryHeapInuseBytes.Set(float64(m.HeapInuse))
+	GCPauseTotalSeconds.Add(float64(m.PauseTotalNs) / 1e9)
+	GCCount.Add(float64(m.NumGC))
 }

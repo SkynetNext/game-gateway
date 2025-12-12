@@ -440,6 +440,9 @@ func (g *Gateway) onRoutingRulesUpdate(rules map[int]*router.RoutingRule) {
 		return
 	}
 
+	// Record successful config refresh
+	defer metrics.ConfigRefreshSuccess.WithLabelValues("routing_rules").Inc()
+
 	// Update routing configurations (without endpoints)
 	g.routingConfigsMu.Lock()
 	for _, rule := range rules {
@@ -566,11 +569,14 @@ func (g *Gateway) onRealmMappingUpdate(mapping map[int32]string) {
 		return
 	}
 
+	// Record successful config refresh
+	defer metrics.ConfigRefreshSuccess.WithLabelValues("realm_mapping").Inc()
+
 	logger.Debug("realm mapping updated", zap.Int("count", len(mapping)))
 }
 
 // startMetricsServer starts the metrics and health check HTTP server
-func (g *Gateway) startMetricsServer(_ context.Context) error {
+func (g *Gateway) startMetricsServer(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", g.healthHandler)
 	mux.HandleFunc("/ready", g.readyHandler)
@@ -589,9 +595,33 @@ func (g *Gateway) startMetricsServer(_ context.Context) error {
 		}
 	}()
 
+	// Start resource metrics updater
+	g.wg.Add(1)
+	go g.resourceMetricsUpdater(ctx)
+
 	logger.Info("metrics server started", zap.Int("port", g.config.Server.HealthCheckPort))
 
 	return nil
+}
+
+// resourceMetricsUpdater periodically updates resource utilization metrics
+func (g *Gateway) resourceMetricsUpdater(ctx context.Context) {
+	defer g.wg.Done()
+
+	ticker := time.NewTicker(15 * time.Second) // Update every 15 seconds
+	defer ticker.Stop()
+
+	// Update immediately on start
+	metrics.UpdateResourceMetrics()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			metrics.UpdateResourceMetrics()
+		}
+	}
 }
 
 // startListener starts the business listener
@@ -1120,6 +1150,8 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 				// Record connection latency
 				connectionLatency := time.Since(connectionStartTime)
 				metrics.BackendConnectionLatency.WithLabelValues(backendAddr).Observe(connectionLatency.Seconds())
+				// Increment active connections counter
+				metrics.BackendConnectionsActive.WithLabelValues(backendAddr).Inc()
 				breaker.RecordSuccess()
 			} else {
 				breaker.RecordFailure()
@@ -1189,6 +1221,8 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 		}
 		if backendConn != nil {
 			g.poolManager.PutConnection(backendAddr, backendConn)
+			// Decrement active connections counter
+			metrics.BackendConnectionsActive.WithLabelValues(backendAddr).Dec()
 		}
 	}()
 
