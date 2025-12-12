@@ -6,6 +6,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/SkynetNext/game-gateway/internal/metrics"
 )
 
 // Connection wraps a TCP connection with metadata
@@ -103,6 +105,9 @@ func (p *Pool) Get(ctx context.Context) (*Connection, error) {
 			p.activeConns[conn] = true
 			p.activeCount++
 			p.mu.Unlock()
+			// Update metrics: connection moved from idle to active
+			metrics.BackendPoolIdle.WithLabelValues(p.address).Dec()
+			metrics.BackendPoolActive.WithLabelValues(p.address).Inc()
 			return conn, nil
 		}
 		// Connection expired, close it and create new one
@@ -110,6 +115,8 @@ func (p *Pool) Get(ctx context.Context) (*Connection, error) {
 		p.mu.Lock()
 		delete(p.activeConns, conn)
 		p.mu.Unlock()
+		// Update metrics: expired idle connection removed
+		metrics.BackendPoolIdle.WithLabelValues(p.address).Dec()
 	default:
 		// No idle connection available
 	}
@@ -141,6 +148,9 @@ func (p *Pool) Get(ctx context.Context) (*Connection, error) {
 	p.activeConns[connection] = true
 	p.activeCount++
 
+	// Update metrics: new connection created and is active
+	metrics.BackendPoolActive.WithLabelValues(p.address).Inc()
+
 	return connection, nil
 }
 
@@ -155,25 +165,40 @@ func (p *Pool) Put(conn *Connection) {
 	}
 	p.mu.Unlock()
 
+	// Update metrics: connection moved from active to idle (or removed if channel full)
+	metrics.BackendPoolActive.WithLabelValues(p.address).Dec()
+
 	// Try to put back to idle channel (non-blocking)
 	select {
 	case p.idleConns <- conn:
 		// Successfully returned to pool
+		metrics.BackendPoolIdle.WithLabelValues(p.address).Inc()
 	default:
 		// Channel full, connection will be closed during cleanup
+		// Note: idle metric not incremented because connection will be closed
 	}
 }
 
 // Remove removes a connection from the pool
+// Note: This method is typically used to remove active connections (e.g., on error).
+// Idle connections are cleaned up by the Cleanup() method.
 func (p *Pool) Remove(conn *Connection) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
+	wasActive := p.activeConns[conn]
 	conn.Close()
 	delete(p.activeConns, conn)
 	if p.activeCount > 0 {
 		p.activeCount--
 	}
+	p.mu.Unlock()
+
+	// Update metrics: only update if connection was active
+	// Idle connections are handled by Cleanup()
+	if wasActive {
+		metrics.BackendPoolActive.WithLabelValues(p.address).Dec()
+	}
+	// Note: If connection was idle (in channel), it will be handled by Cleanup()
+	// We cannot directly remove a specific connection from the channel
 }
 
 // Cleanup removes expired connections
@@ -194,6 +219,8 @@ func (p *Pool) Cleanup() int {
 				}
 				delete(p.activeConns, conn)
 				count++
+				// Update metrics: expired idle connection removed
+				metrics.BackendPoolIdle.WithLabelValues(p.address).Dec()
 			} else {
 				// Put back if still valid
 				select {
@@ -205,6 +232,8 @@ func (p *Pool) Cleanup() int {
 					}
 					delete(p.activeConns, conn)
 					count++
+					// Update metrics: idle connection removed due to full channel
+					metrics.BackendPoolIdle.WithLabelValues(p.address).Dec()
 				}
 			}
 		default:
@@ -234,22 +263,38 @@ func (p *Pool) Stats() (total, active, idle int) {
 // Close closes all connections in the pool
 func (p *Pool) Close() error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	activeCount := p.activeCount
+	p.mu.Unlock()
 
 	// Close all active connections
+	p.mu.Lock()
 	for conn := range p.activeConns {
 		conn.Close()
 	}
 	p.activeConns = make(map[*Connection]bool)
+	p.mu.Unlock()
+
+	// Update metrics for active connections
+	if activeCount > 0 {
+		metrics.BackendPoolActive.WithLabelValues(p.address).Add(float64(-activeCount))
+	}
 
 	// Drain and close idle connections
+	idleCount := 0
 	for {
 		select {
 		case conn := <-p.idleConns:
 			conn.Close()
+			idleCount++
 		default:
 			// Channel empty, done
+			p.mu.Lock()
 			p.activeCount = 0
+			p.mu.Unlock()
+			// Update metrics for idle connections
+			if idleCount > 0 {
+				metrics.BackendPoolIdle.WithLabelValues(p.address).Add(float64(-idleCount))
+			}
 			return nil
 		}
 	}
