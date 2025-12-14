@@ -1202,13 +1202,15 @@ func (g *Gateway) handleTCPConnection(ctx context.Context, conn net.Conn, log *l
 		}
 	}()
 
-	// Record request latency (frontend)
+	// Record connection setup latency (frontend)
+	// Measures: TCP connection start → read first packet → route → establish backend connection → notify backend
 	latency := time.Since(startTime)
-	metrics.RequestLatency.WithLabelValues(fmt.Sprintf("%d", serverType)).Observe(latency.Seconds())
+	metrics.ConnectionSetupLatency.WithLabelValues(fmt.Sprintf("%d", serverType)).Observe(latency.Seconds())
 
-	// Record backend request latency (end-to-end from routing start)
+	// Record backend connection setup latency (from routing start)
+	// Measures: routing decision → circuit breaker check → establish backend connection → notify backend
 	backendLatency := time.Since(backendRequestStart)
-	metrics.BackendRequestLatency.WithLabelValues(backendAddr).Observe(backendLatency.Seconds())
+	metrics.BackendConnectionSetupLatency.WithLabelValues(backendAddr).Observe(backendLatency.Seconds())
 
 	// Extract Trace ID and Span ID for propagation
 	var traceContext map[string]string

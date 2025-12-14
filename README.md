@@ -128,7 +128,7 @@ kubectl apply -f deploy/monitoring.yaml
 
 - `game_gateway_connections_active` - Active connections
 - `game_gateway_sessions_active` - Active sessions
-- `game_gateway_request_latency_seconds` - Request latency histogram
+- `game_gateway_connection_setup_latency_seconds` - Connection setup latency histogram (from TCP connection start to backend connection established)
 - `game_gateway_routing_errors_total` - Routing errors by type
 - `game_gateway_rate_limit_rejected_total` - Rate limit rejections
 - `game_gateway_circuit_breaker_state` - Circuit breaker state

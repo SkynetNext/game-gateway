@@ -324,7 +324,7 @@ ticker := time.NewTicker(5 * time.Minute)
 
 #### 1. Request Latency
 
-**Metric**: `game_gateway_request_latency_seconds`
+**Metric**: `game_gateway_connection_setup_latency_seconds`
 
 **Targets**:
 - P50: < 50ms
@@ -336,7 +336,7 @@ ticker := time.NewTicker(5 * time.Minute)
 **Query**:
 ```promql
 histogram_quantile(0.95, 
-  rate(game_gateway_request_latency_seconds_bucket[5m])
+  rate(game_gateway_connection_setup_latency_seconds_bucket[5m])
 )
 ```
 

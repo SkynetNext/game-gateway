@@ -177,22 +177,22 @@ data:
         },
         {
           "id": 5,
-          "title": "Request Latency (P50/P95/P99)",
+          "title": "Connection Setup Latency (P50/P95/P99)",
           "type": "timeseries",
           "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
           "targets": [
             {
-              "expr": "histogram_quantile(0.50, sum(rate(game_gateway_request_latency_seconds_bucket[5m])) by (le, service_type))",
+              "expr": "histogram_quantile(0.50, sum(rate(game_gateway_connection_setup_latency_seconds_bucket[5m])) by (le, service_type))",
               "legendFormat": "P50 - {{service_type}}",
               "refId": "A"
             },
             {
-              "expr": "histogram_quantile(0.95, sum(rate(game_gateway_request_latency_seconds_bucket[5m])) by (le, service_type))",
+              "expr": "histogram_quantile(0.95, sum(rate(game_gateway_connection_setup_latency_seconds_bucket[5m])) by (le, service_type))",
               "legendFormat": "P95 - {{service_type}}",
               "refId": "B"
             },
             {
-              "expr": "histogram_quantile(0.99, sum(rate(game_gateway_request_latency_seconds_bucket[5m])) by (le, service_type))",
+              "expr": "histogram_quantile(0.99, sum(rate(game_gateway_connection_setup_latency_seconds_bucket[5m])) by (le, service_type))",
               "legendFormat": "P99 - {{service_type}}",
               "refId": "C"
             }

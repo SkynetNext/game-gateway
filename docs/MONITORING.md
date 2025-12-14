@@ -160,7 +160,7 @@ Fluent Bit is chosen over Promtail for enterprise-grade log collection:
 | Metric | Type | Description | Labels |
 |--------|------|-------------|--------|
 | `game_gateway_routing_errors_total` | Counter | Routing errors | `error_type` |
-| `game_gateway_request_latency_seconds` | Histogram | Request latency | `server_type` |
+| `game_gateway_connection_setup_latency_seconds` | Histogram | Connection setup latency (from TCP connection start to backend connection established) | `service_type` |
 
 #### Backend/Upstream Metrics
 
@@ -168,7 +168,7 @@ Fluent Bit is chosen over Promtail for enterprise-grade log collection:
 |--------|------|-------------|--------|
 | `game_gateway_backend_connections_active` | Gauge | Active connections to backend services | `backend` |
 | `game_gateway_backend_requests_total` | Counter | Total requests to backend services | `backend`, `status` |
-| `game_gateway_backend_request_latency_seconds` | Histogram | Backend request latency (end-to-end) | `backend` |
+| `game_gateway_backend_connection_setup_latency_seconds` | Histogram | Backend connection setup latency (from routing decision to backend connection established) | `backend` |
 | `game_gateway_backend_connection_latency_seconds` | Histogram | Backend connection establishment latency | `backend` |
 | `game_gateway_backend_errors_total` | Counter | Total backend errors | `backend`, `error_type` |
 | `game_gateway_backend_timeouts_total` | Counter | Total backend timeouts | `backend` |
@@ -230,7 +230,7 @@ sum(rate(game_gateway_connections_total[5m])) * 100
 
 ```promql
 histogram_quantile(0.95, 
-  sum(rate(game_gateway_request_latency_seconds_bucket[5m])) by (le)
+  sum(rate(game_gateway_connection_setup_latency_seconds_bucket[5m])) by (le)
 )
 ```
 
@@ -252,7 +252,7 @@ sum(rate(game_gateway_backend_requests_total[5m])) by (backend) * 100
 
 ```promql
 histogram_quantile(0.95, 
-  sum(rate(game_gateway_backend_request_latency_seconds_bucket[5m])) by (le, backend)
+  sum(rate(game_gateway_backend_connection_setup_latency_seconds_bucket[5m])) by (le, backend)
 )
 ```
 
@@ -318,15 +318,15 @@ Pre-configured dashboard with **16 core panels** optimized for game gateway moni
 1. **Connection Success Rate** (Gauge) - Frontend connection success rate with thresholds
 2. **Active Connections** (Stat) - Current active connection count
 3. **Backend Error Rate** (Gauge) - Upstream service error rate by backend
-4. **P95 Latency** (Stat) - 95th percentile request latency
+4. **P95 Latency** (Stat) - 95th percentile connection setup latency
 
 #### Row 2: Connection Trends (2 panels, 12x8)
 5. **Connection Establishment Rate** (Timeseries) - Successful, rejected, and total attempts/sec
 6. **Active Connections & Sessions Trend** (Timeseries) - Connection and session trends over time
 
 #### Row 3: Latency Analysis (2 panels, 12x8)
-7. **Frontend Request Latency** (Timeseries) - P50/P95/P99 by service type
-8. **Backend Request Latency** (Timeseries) - P50/P95/P99 by backend
+7. **Connection Setup Latency** (Timeseries) - P50/P95/P99 by service type (from TCP connection start to backend connection established)
+8. **Backend Connection Setup Latency** (Timeseries) - P50/P95/P99 by backend (from routing decision to backend connection established)
 
 #### Row 4: Error Analysis (2 panels, 12x8)
 9. **Routing Errors by Type** (Timeseries) - Frontend routing errors breakdown
@@ -629,7 +629,7 @@ readinessProbe:
 - Frontend Connection: 3 metrics (connections_active, connections_total, connection_rejected_total)
 - Backend/Upstream: 9 metrics (connections, requests, latency, errors, timeouts, retries, health, bytes)
 - Session: 1 metric (sessions_active)
-- Routing: 2 metrics (routing_errors_total, request_latency_seconds)
+- Routing: 2 metrics (routing_errors_total, connection_setup_latency_seconds)
 - Circuit Breaker: 1 metric (circuit_breaker_state)
 - Message Processing: 1 metric (messages_processed_total)
 - Configuration: 3 metrics (config_refresh_success/errors, pool_cleanup_errors)
@@ -657,7 +657,7 @@ readinessProbe:
 **Quick Health Check** (Row 1 - Core KPI):
 - Connection Success Rate > 99% ✅
 - Backend Error Rate < 1% ✅
-- P95 Latency < 50ms ✅
+- P95 Connection Setup Latency < 50ms ✅
 
 **Traffic Analysis** (Row 2-3):
 - Monitor connection establishment patterns
@@ -683,7 +683,7 @@ readinessProbe:
 - Pod Down
 
 **Warning** (Investigate within 30 min):
-- P95 Latency > 100ms
+- P95 Connection Setup Latency > 100ms
 - Backend Error Rate > 1%
 - Memory Usage > 80%
 - Config Refresh Failures

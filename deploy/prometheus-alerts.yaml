@@ -59,13 +59,13 @@ spec:
         # High latency
         - alert: GameGatewayHighLatency
           expr: |
-            histogram_quantile(0.95, sum(rate(game_gateway_request_latency_seconds_bucket[5m])) by (le)) > 1
+            histogram_quantile(0.95, sum(rate(game_gateway_connection_setup_latency_seconds_bucket[5m])) by (le)) > 1
           for: 5m
           labels:
             severity: warning
           annotations:
-            summary: "Game Gateway high latency"
-            description: "P95 latency is {{ $value }}s (threshold: 1s)"
+            summary: "Game Gateway high connection setup latency"
+            description: "P95 connection setup latency is {{ $value }}s (threshold: 1s)"
 
         # Configuration refresh failures
         - alert: GameGatewayConfigRefreshFailure

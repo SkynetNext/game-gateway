@@ -53,9 +53,11 @@ var (
 		Help: "Total number of requests to backend services",
 	}, []string{"backend", "status"})
 
-	BackendRequestLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "game_gateway_backend_request_latency_seconds",
-		Help:    "Backend request latency in seconds (end-to-end)",
+	// Backend connection setup latency (from routing start)
+	// Measures time from routing decision to backend connection established
+	BackendConnectionSetupLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "game_gateway_backend_connection_setup_latency_seconds",
+		Help:    "Backend connection setup latency in seconds (from routing decision to backend connection established)",
 		Buckets: prometheus.ExponentialBuckets(0.001, 2, 12), // 1ms to 4s
 	}, []string{"backend"})
 
@@ -85,10 +87,11 @@ var (
 		Help: "Total bytes transmitted to backend",
 	}, []string{"backend", "direction"})
 
-	// Request latency (frontend)
-	RequestLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "game_gateway_request_latency_seconds",
-		Help:    "Request latency in seconds",
+	// Connection setup latency (frontend)
+	// Measures time from TCP connection start to backend connection established
+	ConnectionSetupLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "game_gateway_connection_setup_latency_seconds",
+		Help:    "Connection setup latency in seconds (from TCP connection start to backend connection established)",
 		Buckets: prometheus.ExponentialBuckets(0.001, 2, 10), // 1ms to 1s
 	}, []string{"service_type"})
 
